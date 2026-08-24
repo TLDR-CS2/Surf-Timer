@@ -1,8 +1,8 @@
-# Security policy
+# Security
 
 ## Supported version
 
-Security fixes currently target the latest release only.
+Only the latest release receives security fixes.
 
 | Version | Supported |
 |---|---|
@@ -10,10 +10,6 @@ Security fixes currently target the latest release only.
 
 ## Reporting a vulnerability
 
-Do not disclose exploitable vulnerabilities in a public issue. Use the repository's private GitHub
-Security Advisory reporting feature. Include affected versions, reproduction steps, impact, and any
-suggested mitigation. Avoid including live database credentials, Steam Web API keys, server tokens,
-or player data in reports.
+Do not report exploitable issues in a public issue. Use GitHub's private security advisory form and include the affected version, reproduction steps and impact.
 
-SurfTimer does not require credentials in its repository or plugin directory. Database secrets belong
-in SwiftlyS2's external database configuration or environment variables used by the optional website.
+Do not include credentials, server tokens or player data in a report. Database credentials belong in SwiftlyS2's database config or the website's environment variables, never in the repository.

@@ -1,8 +1,8 @@
 # Map catalog
 
-SurfTimer uses mapper-created trigger entities exclusively. A JSON definition describes the
-expected trigger names; it does not create or replace zones. Run `surftimer_map_check` after a
-map loads to verify its live entities, and `surftimer_catalog_check` to validate the static catalog.
+Each JSON file lists the mapper triggers SurfTimer expects to find. It does not create zones. Run
+`surftimer_map_check` on the loaded map to check its entities, or `surftimer_catalog_check` to check
+the JSON files.
 
 | Map | Tier | Structure | Bonuses | Workshop ID |
 |---|---:|---|---:|---:|
@@ -23,5 +23,4 @@ map loads to verify its live entities, and `surftimer_catalog_check` to validate
 | surf_lt_omnific | 6 | Staged, 18 stages | 3 | 3660894345 |
 | surf_goliath | 7 | Staged, 4 stages | 4 | 3448505317 |
 
-Workshop metadata is discovery information only. The runtime compatibility result is authoritative
-for timer support because Workshop maps can be updated independently of this repository.
+Workshop maps can change after these files are written, so the in-game compatibility check is the final test.

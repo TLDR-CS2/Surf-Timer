@@ -1,11 +1,10 @@
-# SurfTimer feature status
+# Feature status
 
-This document reconciles the original SharpTimer-inspired plan with the current SwiftlyS2-native
-implementation. It is a delivery checklist, not a claim of strict SharpTimer behavioral compatibility.
+SurfTimer borrows familiar commands and ideas from SharpTimer, but it is not intended to be a drop-in behavioural clone.
 
-## Implemented and automated
+## Implemented
 
-| Area | Current implementation | Automated evidence |
+| Area | Current state | Checked by |
 |---|---|---|
 | Plugin lifecycle | DI-composed SwiftlyS2 plugin, hot-load-aware services and clean unregister paths | Release build and two-instance smoke test |
 | Player lifecycle | SteamID64 sessions, auth/connect/disconnect/team/death handling | Lifecycle regression suite and server logs |
@@ -24,15 +23,14 @@ implementation. It is a delivery checklist, not a claim of strict SharpTimer beh
 | Operations | Versioned releases, checksums, backup/restore, rollback and multi-server configs | Release and deployment smoke scripts |
 | Import | Dry-run-first SharpTimer MariaDB importer | Isolated importer tooling; real source dataset still required |
 
-## Deliberately out of scope
+## Out of scope
 
 - Bhop, KZ and non-Surf modes.
 - Manual/fallback zones and an in-game zone editor. Mapper triggers are authoritative.
 - Server-specific records or player history views. Records are global across the shared database.
-- Tier 8. Tier 7 is the maximum.
-- Public licensing until the owner selects a license.
+- Tier 8. The catalog stops at Tier 7.
 
-## Deferred or externally blocked
+## Deferred
 
 | Feature | Reason / next dependency |
 |---|---|
@@ -42,10 +40,8 @@ implementation. It is a delivery checklist, not a claim of strict SharpTimer beh
 | Production web hosting | Deferred until the project is intended to go live |
 | Discord/webhook integration | No endpoint, credentials or notification policy selected |
 | Anti-cheat enforcement | Telemetry and invalidation exist; punitive policy/integration is intentionally not assumed |
-| Public release/license | Requires owner choice and final public security/deployment review |
+| License | No licence has been selected |
 
-## Manual-client acceptance remains
+## Still requires in-game testing
 
-Game-client tests are still required for physical trigger touch behavior, teleport placement, HUD appearance,
-menu controls, spectator transitions, audio, and replay camera feel. The final delivery message for each milestone
-must list those steps explicitly.
+Automated tests cannot verify trigger touch behaviour, teleport placement, HUD appearance, menu controls, spectator transitions, sound or replay camera feel. New work in those areas still needs a client test.

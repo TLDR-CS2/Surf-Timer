@@ -2,7 +2,7 @@
 
 ## Before tagging
 
-- Run `tools/Test-All.ps1 -IncludeLiveDatabase -IncludeReleasePackage` against a disposable or development database.
+- Run `tools/Test-All.ps1 -IncludeLiveDatabase -IncludeReleasePackage` against a development database.
 - Complete the outstanding in-game map, route, voting, replay, and clean-install acceptance tests.
 - Confirm `BuildInfo.Version`, project versions, website version, changelog, and tag agree.
 - Build the release with `tools/release/Build-Release.ps1`.
@@ -13,10 +13,10 @@
 ## GitHub release
 
 - Commit the release source.
-- Create an annotated `v0.1.0` tag on the tested commit.
+- Create an annotated version tag on the tested commit.
 - Push the branch and tag.
 - Create a GitHub Release using `CHANGELOG.md` as the basis for release notes.
-- Attach `SurfTimer-0.1.0.zip` and `SurfTimer-0.1.0.zip.sha256`.
+- Attach the versioned ZIP and its `.sha256` file.
 - Mark it as a pre-release if the in-game and clean-install acceptance checklist is incomplete.
 
 ## After publishing
