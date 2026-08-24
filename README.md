@@ -301,4 +301,3 @@ The implementation status against the original project scope is tracked in [`doc
 ## License
 
 This project is currently under private development. No open-source license has been selected, so redistribution or modification rights are not granted until a license file is added.
-

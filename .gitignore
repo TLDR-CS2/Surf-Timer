@@ -1,0 +1,14 @@
+build/
+bin/
+obj/
+.vs/
+.idea/
+*.user
+*.suo
+.research/
+tools/local-server/database.local.jsonc
+tools/local-server/plugin-config.local.jsonc
+tools/local-server/.runtime/
+backups/
+artifacts/
+lib/*.dll

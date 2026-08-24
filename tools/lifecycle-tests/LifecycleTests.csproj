@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/Timing/PlayerRun.cs" Link="PlayerRun.cs" />
+    <Compile Include="../../src/Storage/SurfPointsPolicy.cs" Link="SurfPointsPolicy.cs" />
+  </ItemGroup>
+</Project>

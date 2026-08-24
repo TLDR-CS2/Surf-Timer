@@ -1,0 +1,48 @@
+{
+  "SurfTimer": {
+    // Set a unique value on every server sharing the central database.
+    "ServerId": "change-me",
+
+    // Named connection from addons/swiftlys2/configs/database.jsonc.
+    "DatabaseConnection": "surftimer",
+
+    "Enabled": true,
+    "DebugLogging": false,
+    "HudRefreshRateHz": 64,
+
+    // Disable this entire block when a dedicated RockTheVote plugin owns !rtv/!nominate.
+    "MapVoting": {
+      "Enabled": true,
+      "RockTheVoteEnabled": true,
+      "NominationEnabled": true,
+      "EndOfMapVoteEnabled": false,
+      "RtvThreshold": 0.60,
+      "MinimumRtvVotes": 1,
+      "VoteDurationSeconds": 60,
+      "CandidateCount": 5,
+      "RecentMapExclusionCount": 3,
+      "ExtendMapMinutes": 10,
+      // Easy servers use 1-2; hard uses 1-7; expert uses 4-7.
+      "MinimumTier": 1,
+      "MaximumTier": 2,
+      "Maps": [
+        { "Name": "surf_boreas", "WorkshopId": "3133346713" },
+        { "Name": "surf_kitsune", "WorkshopId": "3076153623" },
+        { "Name": "surf_mesa_revo", "WorkshopId": "3076980482" },
+        { "Name": "surf_mom", "WorkshopId": "3282137145" },
+        { "Name": "surf_prisma", "WorkshopId": "3319154265" },
+        { "Name": "surf_cyka_ksf", "WorkshopId": "3263197243" },
+        { "Name": "surf_elysium", "WorkshopId": "3147764666" },
+        { "Name": "surf_goliath", "WorkshopId": "3448505317" },
+        { "Name": "surf_mesa_aether", "WorkshopId": "3125360522" },
+        { "Name": "surf_aquaflow", "WorkshopId": "3255589335" },
+        { "Name": "surf_newbie", "WorkshopId": "3263974751" },
+        { "Name": "surf_zeitgeist", "WorkshopId": "3265329080" },
+        { "Name": "surf_jive", "WorkshopId": "3318285030" },
+        { "Name": "surf_cannonball", "WorkshopId": "3152119098" },
+        { "Name": "surf_sippysip", "WorkshopId": "3246776437" },
+        { "Name": "surf_lt_omnific", "WorkshopId": "3660894345" }
+      ]
+    }
+  }
+}

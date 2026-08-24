@@ -1,0 +1,15 @@
+{
+  "SurfTimer": {
+    "Enabled": true,
+    "DebugLogging": false,
+    "DatabaseConnection": "surftimer",
+    "ServerId": "surf-2",
+    "HudRefreshRateHz": 64,
+    "MapVoting": {
+      "Enabled": true,
+      "ExtendMapMinutes": 10,
+      "MinimumTier": 1,
+      "MaximumTier": 2
+    }
+  }
+}

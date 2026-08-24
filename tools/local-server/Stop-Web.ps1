@@ -1,0 +1,2 @@
+[CmdletBinding()]param()
+$pidPath=Join-Path $PSScriptRoot '.runtime\surftimer-web.pid';if(!(Test-Path $pidPath)){Write-Host 'SurfTimer web is not running.';return}$id=[int](Get-Content $pidPath);$process=Get-Process -Id $id -ErrorAction SilentlyContinue;if($process){Stop-Process -Id $id -Force;Wait-Process -Id $id -ErrorAction SilentlyContinue;Write-Host "Stopped SurfTimer web PID $id."}Remove-Item -LiteralPath $pidPath -Force

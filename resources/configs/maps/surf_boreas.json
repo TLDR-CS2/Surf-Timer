@@ -1,0 +1,9 @@
+{
+  "Enabled": true,
+  "Tier": 1,
+  "StartTrigger": "map_start",
+  "EndTrigger": "map_end",
+  "CheckpointPrefix": "map_cp",
+  "CheckpointCount": 2,
+  "MaxVelocity": 5000
+}
