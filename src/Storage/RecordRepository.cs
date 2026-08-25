@@ -518,6 +518,47 @@ public sealed class RecordRepository(
         return new PersonalBestDetails(time, rank, total, completions, splits);
     }
 
+    public async Task<MapRunComparison> GetMapRunComparisonAsync(ulong steamId, string mapName)
+    {
+        await ReadyAsync().ConfigureAwait(false);
+        await using var connection = await OpenAsync().ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT r.id,r.player_steam_id,r.best_time_us,r.completions
+            FROM st_records r JOIN st_maps m ON m.id=r.map_id
+            WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
+            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id
+            """;
+        command.AddParameter("@map", mapName);
+        var rows = new List<(long Id, ulong SteamId, long Time, int Completions)>();
+        await using (var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false))
+        {
+            while (await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
+                rows.Add((Convert.ToInt64(reader.GetValue(0)), Convert.ToUInt64(reader.GetValue(1)),
+                    Convert.ToInt64(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3))));
+        }
+
+        async Task<PersonalBestDetails?> BuildDetailsAsync(int index)
+        {
+            if (index < 0) return null;
+            var row = rows[index];
+            await using var splitCommand = connection.CreateCommand();
+            splitCommand.CommandText = "SELECT checkpoint,split_time_us FROM st_record_splits WHERE record_id=@id ORDER BY checkpoint";
+            splitCommand.AddParameter("@id", row.Id);
+            var splits = new List<RecordSplit>();
+            await using var splitReader = await splitCommand.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
+            while (await splitReader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
+                splits.Add(new RecordSplit(Convert.ToInt32(splitReader.GetValue(0)), Convert.ToInt64(splitReader.GetValue(1))));
+            var rank = 1 + rows.Count(value => value.Time < row.Time);
+            return new PersonalBestDetails(row.Time, rank, rows.Count, row.Completions, splits);
+        }
+
+        var personalIndex = rows.FindIndex(value => value.SteamId == steamId);
+        var personal = await BuildDetailsAsync(personalIndex).ConfigureAwait(false);
+        var worldRecord = await BuildDetailsAsync(rows.Count == 0 ? -1 : 0).ConfigureAwait(false);
+        return new MapRunComparison(personal, worldRecord, rows.Select(value => value.Time).ToArray());
+    }
+
     public async Task<IReadOnlyList<LeaderboardEntry>> GetTopAsync(string mapName, int limit = 10)
     {
         await ReadyAsync().ConfigureAwait(false);
@@ -541,6 +582,25 @@ public sealed class RecordRepository(
             entries.Add(new LeaderboardEntry(Convert.ToInt32(reader.GetValue(0)), Convert.ToUInt64(reader.GetValue(1)), reader.GetString(2),
                 Convert.ToInt64(reader.GetValue(3)), Convert.ToInt32(reader.GetValue(4))));
         return entries;
+    }
+
+    public async Task<IReadOnlyList<long>> GetRankedTimesAsync(string mapName)
+    {
+        await ReadyAsync().ConfigureAwait(false);
+        await using var connection = await OpenAsync().ConfigureAwait(false);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            SELECT r.best_time_us
+            FROM st_records r JOIN st_maps m ON m.id=r.map_id
+            WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
+            ORDER BY r.best_time_us
+            """;
+        command.AddParameter("@map", mapName);
+        var times = new List<long>();
+        await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
+        while (await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
+            times.Add(Convert.ToInt64(reader.GetValue(0)));
+        return times;
     }
 
     public async Task<IReadOnlyList<PlayerIdentity>> FindPlayersAsync(string query, int limit = 5)

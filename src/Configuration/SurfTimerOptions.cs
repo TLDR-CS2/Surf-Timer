@@ -22,7 +22,8 @@ public sealed class MapVotingOptions
     public bool Enabled { get; init; } = true;
     public bool RockTheVoteEnabled { get; init; } = true;
     public bool NominationEnabled { get; init; } = true;
-    public bool EndOfMapVoteEnabled { get; init; } = false;
+    public bool EndOfMapVoteEnabled { get; init; } = true;
+    public int ForceVoteAfterMinutes { get; init; } = 15;
     public double RtvThreshold { get; init; } = 0.60;
     public int MinimumRtvVotes { get; init; } = 1;
     public int VoteDurationSeconds { get; init; } = 60;

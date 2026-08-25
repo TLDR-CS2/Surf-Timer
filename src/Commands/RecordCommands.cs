@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SurfTimer.Chat;
 using SurfTimer.Maps;
 using SurfTimer.Storage;
 using SurfTimer.Timing;
@@ -135,7 +136,7 @@ public sealed class RecordCommands(
         bonus = 0;
         if (!TryCapturePlayer(context, out playerId, out sessionId, out steamId, out map)) return false;
         if (context.Args.Length != 1 || !int.TryParse(context.Args[0], out bonus) || bonus < 1 || bonus > maps.BonusCount)
-        { context.Reply($"[SurfTimer] Usage: {context.CommandName} <1-{maps.BonusCount}>"); return false; }
+        { context.Reply(ChatFormat.Warning($"Usage: {context.CommandName} <1-{maps.BonusCount}>")); return false; }
         return true;
     }
 
@@ -144,10 +145,10 @@ public sealed class RecordCommands(
         try
         {
             var pb = await records.GetBonusPersonalBestAsync(steamId, map, bonus).ConfigureAwait(false);
-            if (pb is null) { ReplyNextTick(playerId, sessionId, $"[SurfTimer] No Bonus {bonus} PB on {map} yet."); return; }
+            if (pb is null) { ReplyNextTick(playerId, sessionId, ChatFormat.Message($"No Bonus {bonus} PB on {map} yet.")); return; }
             var top = await records.GetBonusTopAsync(map, bonus, 1).ConfigureAwait(false);
-            var delta = top.Count > 0 && pb.Rank != 1 ? $" | WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}" : string.Empty;
-            ReplyNextTick(playerId, sessionId, $"[SurfTimer] Bonus {bonus} PB — {TimerManager.FormatTime(pb.TimeMicroseconds)} | rank #{pb.Rank}/{pb.TotalRecords} | {pb.Completions} completions{delta}");
+            var delta = top.Count > 0 && pb.Rank != 1 ? $" {ChatFormat.MutedColor}·{ChatFormat.Reset} {ChatFormat.ErrorColor}WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}{ChatFormat.Reset}" : string.Empty;
+            ReplyNextTick(playerId, sessionId, $"{ChatFormat.Prefix} {ChatFormat.RouteColor}BONUS {bonus} PB{ChatFormat.Reset} · {ChatFormat.SuccessColor}{TimerManager.FormatTime(pb.TimeMicroseconds)}{ChatFormat.Reset} · {ChatFormat.Rank(pb.Rank)}/{pb.TotalRecords} · {pb.Completions} finishes{delta}");
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
     }
@@ -161,10 +162,10 @@ public sealed class RecordCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
-                player.SendChat($"[SurfTimer] Global Bonus {bonus} top 10 — {map}");
-                if (top.Count == 0) player.SendChat("[SurfTimer] No bonus records yet.");
+                player.SendChat(ChatFormat.Header($"Bonus {bonus} Top 10 · {map}"));
+                if (top.Count == 0) player.SendChat(ChatFormat.Row("", "No bonus records yet.", ChatFormat.MutedColor));
                 foreach (var entry in top)
-                    player.SendChat($"#{entry.Rank} {entry.PlayerName}{(entry.SteamId == steamId ? " (you)" : string.Empty)} — {TimerManager.FormatTime(entry.TimeMicroseconds)}");
+                    player.SendChat($"{ChatFormat.Rank(entry.Rank)} {entry.PlayerName}{(entry.SteamId == steamId ? $" {ChatFormat.SuccessColor}YOU{ChatFormat.Reset}" : string.Empty)} {ChatFormat.MutedColor}·{ChatFormat.Reset} {ChatFormat.RouteColor}{TimerManager.FormatTime(entry.TimeMicroseconds)}{ChatFormat.Reset}");
             });
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
@@ -175,9 +176,9 @@ public sealed class RecordCommands(
         try
         {
             var top = await records.GetBonusTopAsync(map, bonus, 1).ConfigureAwait(false);
-            if (top.Count == 0) { ReplyNextTick(playerId, sessionId, $"[SurfTimer] Bonus {bonus} has no world record yet."); return; }
+            if (top.Count == 0) { ReplyNextTick(playerId, sessionId, ChatFormat.Message($"Bonus {bonus} has no world record yet.")); return; }
             var wr = top[0];
-            ReplyNextTick(playerId, sessionId, $"[SurfTimer] Bonus {bonus} WR — {wr.PlayerName} — {TimerManager.FormatTime(wr.TimeMicroseconds)}");
+            ReplyNextTick(playerId, sessionId, $"{ChatFormat.Prefix} {ChatFormat.HighlightColor}BONUS {bonus} WR{ChatFormat.Reset} · {wr.PlayerName} · {ChatFormat.HighlightColor}{TimerManager.FormatTime(wr.TimeMicroseconds)}{ChatFormat.Reset}");
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
     }
@@ -187,7 +188,7 @@ public sealed class RecordCommands(
         stage = 0;
         if (!TryCapturePlayer(context, out playerId, out sessionId, out steamId, out map)) return false;
         if (context.Args.Length != 1 || !int.TryParse(context.Args[0], out stage) || stage < 1 || stage > maps.StageCount)
-        { context.Reply($"[SurfTimer] Usage: {context.CommandName} <1-{maps.StageCount}>"); return false; }
+        { context.Reply(ChatFormat.Warning($"Usage: {context.CommandName} <1-{maps.StageCount}>")); return false; }
         return true;
     }
 
@@ -196,10 +197,10 @@ public sealed class RecordCommands(
         try
         {
             var pb = await records.GetStagePersonalBestAsync(steamId, map, stage).ConfigureAwait(false);
-            if (pb is null) { ReplyNextTick(playerId, sessionId, $"[SurfTimer] No Stage {stage} PB on {map} yet."); return; }
+            if (pb is null) { ReplyNextTick(playerId, sessionId, ChatFormat.Message($"No Stage {stage} PB on {map} yet.")); return; }
             var top = await records.GetStageTopAsync(map, stage, 1).ConfigureAwait(false);
-            var delta = top.Count > 0 && pb.Rank != 1 ? $" | WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}" : string.Empty;
-            ReplyNextTick(playerId, sessionId, $"[SurfTimer] Stage {stage} PB — {TimerManager.FormatTime(pb.TimeMicroseconds)} | rank #{pb.Rank}/{pb.TotalRecords} | {pb.Completions} completions{delta}");
+            var delta = top.Count > 0 && pb.Rank != 1 ? $" {ChatFormat.MutedColor}·{ChatFormat.Reset} {ChatFormat.ErrorColor}WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}{ChatFormat.Reset}" : string.Empty;
+            ReplyNextTick(playerId, sessionId, $"{ChatFormat.Prefix} {ChatFormat.RouteColor}STAGE {stage} PB{ChatFormat.Reset} · {ChatFormat.SuccessColor}{TimerManager.FormatTime(pb.TimeMicroseconds)}{ChatFormat.Reset} · {ChatFormat.Rank(pb.Rank)}/{pb.TotalRecords} · {pb.Completions} finishes{delta}");
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
     }
@@ -213,10 +214,10 @@ public sealed class RecordCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
-                player.SendChat($"[SurfTimer] Global Stage {stage} top 10 — {map}");
-                if (top.Count == 0) player.SendChat("[SurfTimer] No stage records yet.");
+                player.SendChat(ChatFormat.Header($"Stage {stage} Top 10 · {map}"));
+                if (top.Count == 0) player.SendChat(ChatFormat.Row("", "No stage records yet.", ChatFormat.MutedColor));
                 foreach (var entry in top)
-                    player.SendChat($"#{entry.Rank} {entry.PlayerName}{(entry.SteamId == steamId ? " (you)" : string.Empty)} — {TimerManager.FormatTime(entry.TimeMicroseconds)}");
+                    player.SendChat($"{ChatFormat.Rank(entry.Rank)} {entry.PlayerName}{(entry.SteamId == steamId ? $" {ChatFormat.SuccessColor}YOU{ChatFormat.Reset}" : string.Empty)} {ChatFormat.MutedColor}·{ChatFormat.Reset} {ChatFormat.RouteColor}{TimerManager.FormatTime(entry.TimeMicroseconds)}{ChatFormat.Reset}");
             });
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
@@ -227,9 +228,9 @@ public sealed class RecordCommands(
         try
         {
             var top = await records.GetStageTopAsync(map, stage, 1).ConfigureAwait(false);
-            if (top.Count == 0) { ReplyNextTick(playerId, sessionId, $"[SurfTimer] Stage {stage} has no world record yet."); return; }
+            if (top.Count == 0) { ReplyNextTick(playerId, sessionId, ChatFormat.Message($"Stage {stage} has no world record yet.")); return; }
             var wr = top[0];
-            ReplyNextTick(playerId, sessionId, $"[SurfTimer] Stage {stage} WR — {wr.PlayerName} — {TimerManager.FormatTime(wr.TimeMicroseconds)}");
+            ReplyNextTick(playerId, sessionId, $"{ChatFormat.Prefix} {ChatFormat.HighlightColor}STAGE {stage} WR{ChatFormat.Reset} · {wr.PlayerName} · {ChatFormat.HighlightColor}{TimerManager.FormatTime(wr.TimeMicroseconds)}{ChatFormat.Reset}");
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
     }
@@ -238,7 +239,7 @@ public sealed class RecordCommands(
     {
         playerId = -1; sessionId = 0; steamId = 0; map = maps.Current?.Name ?? string.Empty;
         if (!context.IsSentByPlayer || context.Sender is null) { context.Reply("This command requires a player caller."); return false; }
-        if (string.IsNullOrWhiteSpace(map)) { context.Reply("[SurfTimer] No map is active."); return false; }
+        if (string.IsNullOrWhiteSpace(map)) { context.Reply(ChatFormat.Error("No map is active.")); return false; }
         playerId = context.Sender.PlayerID; sessionId = context.Sender.SessionId; steamId = context.Sender.SteamID;
         return true;
     }
@@ -257,8 +258,8 @@ public sealed class RecordCommands(
             if (pb is null)
             {
                 ReplyNextTick(playerId, sessionId, self
-                    ? $"[SurfTimer] No PB on {map} yet — finish the map to set one."
-                    : $"[SurfTimer] {target.PlayerName} has no PB on {map}.");
+                    ? ChatFormat.Message($"No PB on {map} yet · finish the map to set one.")
+                    : ChatFormat.Message($"{target.PlayerName} has no PB on {map}."));
                 return;
             }
             var top = await records.GetTopAsync(map, 1).ConfigureAwait(false);
@@ -270,11 +271,12 @@ public sealed class RecordCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
-                var wrDelta = top.Count > 0 && pb.Rank != 1 ? $" • WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}" : string.Empty;
+                var wrDelta = top.Count > 0 && pb.Rank != 1 ? $" · {ChatFormat.ErrorColor}WR +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)}{ChatFormat.Reset}" : $" · {ChatFormat.HighlightColor}WR{ChatFormat.Reset}";
                 var owner = self ? "PB" : $"{target.PlayerName}'s PB";
-                var group = points.Group is null ? string.Empty : $" • {points.Group}";
-                player.SendChat($"[SurfTimer] {owner} — {map} (Tier {CurrentTier}) • {TimerManager.FormatTime(pb.TimeMicroseconds)} • rank #{pb.Rank}/{pb.TotalRecords} • percentile {points.Percentile:P1}{group}");
-                player.SendChat($"[SurfTimer] Map points: {points.Points:N0} • Global points: {overall?.Points ?? 0:N0} • {pb.Completions} finishes{wrDelta}");
+                var group = points.Group is null ? "No group" : points.Group;
+                player.SendChat(ChatFormat.Header($"{owner} · {map}"));
+                player.SendChat($"{ChatFormat.SuccessColor}{TimerManager.FormatTime(pb.TimeMicroseconds)}{ChatFormat.Reset} · {ChatFormat.Rank(pb.Rank)}/{pb.TotalRecords} · {points.Percentile:P1} · {group}");
+                player.SendChat(ChatFormat.Row("POINTS ·", $"Map {points.Points:N0} · Global {overall?.Points ?? 0:N0} · {pb.Completions} finishes{wrDelta}"));
                 SendSplits(player, pb.Splits, wr?.Splits);
             });
         }
@@ -291,12 +293,12 @@ public sealed class RecordCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
-                player.SendChat($"[SurfTimer] Global top 10 — {map} (Tier {CurrentTier})");
-                if (top.Count == 0) player.SendChat("[SurfTimer] No records yet.");
+                player.SendChat(ChatFormat.Header($"Top 10 · {map} · Tier {CurrentTier}"));
+                if (top.Count == 0) player.SendChat(ChatFormat.Row("", "No records yet.", ChatFormat.MutedColor));
                 foreach (var entry in top)
                 {
                     var group = SurfPointsPolicy.ForMainMap(CurrentTier, entry.Rank, summary.RecordCount).Group;
-                    player.SendChat($"#{entry.Rank} {entry.PlayerName}{(entry.SteamId == steamId ? " (you)" : string.Empty)} — {TimerManager.FormatTime(entry.TimeMicroseconds)}{(group is null ? string.Empty : $" • {group}")} • {entry.Completions} finishes");
+                    player.SendChat($"{ChatFormat.Rank(entry.Rank)} {entry.PlayerName}{(entry.SteamId == steamId ? $" {ChatFormat.SuccessColor}YOU{ChatFormat.Reset}" : string.Empty)} {ChatFormat.MutedColor}·{ChatFormat.Reset} {ChatFormat.SuccessColor}{TimerManager.FormatTime(entry.TimeMicroseconds)}{ChatFormat.Reset}{(group is null ? string.Empty : $" · {group}")} {ChatFormat.MutedColor}· {entry.Completions} finishes{ChatFormat.Reset}");
                 }
             });
         }
@@ -310,7 +312,7 @@ public sealed class RecordCommands(
             var top = await records.GetTopAsync(map, 1).ConfigureAwait(false);
             if (top.Count == 0)
             {
-                ReplyNextTick(playerId, sessionId, $"[SurfTimer] {map} has no world record yet.");
+                ReplyNextTick(playerId, sessionId, ChatFormat.Message($"{map} has no world record yet."));
                 return;
             }
             var wr = top[0];
@@ -319,7 +321,8 @@ public sealed class RecordCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
-                player.SendChat($"[SurfTimer] WR — {map} • {wr.PlayerName} • {TimerManager.FormatTime(wr.TimeMicroseconds)} • {wr.Completions} finishes");
+                player.SendChat(ChatFormat.Header($"World Record · {map}"));
+                player.SendChat($"{ChatFormat.HighlightColor}{TimerManager.FormatTime(wr.TimeMicroseconds)}{ChatFormat.Reset} · {wr.PlayerName} {ChatFormat.MutedColor}· {wr.Completions} finishes{ChatFormat.Reset}");
                 if (details is not null) SendSplits(player, details.Splits, null);
             });
         }
@@ -340,17 +343,17 @@ public sealed class RecordCommands(
             if (pb is null)
             {
                 ReplyNextTick(playerId, sessionId, self
-                    ? $"[SurfTimer] You are unranked on {map}."
-                    : $"[SurfTimer] {target.PlayerName} is unranked on {map}.");
+                    ? ChatFormat.Message($"You are unranked on {map}.")
+                    : ChatFormat.Message($"{target.PlayerName} is unranked on {map}."));
                 return;
             }
             var top = await records.GetTopAsync(map, 1).ConfigureAwait(false);
             var behind = top.Count > 0 && pb.Rank != 1
-                ? $" • +{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)} behind WR"
-                : " • world record";
-            var owner = self ? "Rank" : $"{target.PlayerName} — rank";
+                ? $" · {ChatFormat.ErrorColor}+{FormatDelta(pb.TimeMicroseconds - top[0].TimeMicroseconds)} behind WR{ChatFormat.Reset}"
+                : $" · {ChatFormat.HighlightColor}world record{ChatFormat.Reset}";
+            var owner = self ? "RANK" : target.PlayerName;
             ReplyNextTick(playerId, sessionId,
-                $"[SurfTimer] {owner} #{pb.Rank}/{pb.TotalRecords} — {TimerManager.FormatTime(pb.TimeMicroseconds)}{behind} • {pb.Completions} finishes");
+                $"{ChatFormat.Prefix} {owner} · {ChatFormat.Rank(pb.Rank)}/{pb.TotalRecords} · {ChatFormat.SuccessColor}{TimerManager.FormatTime(pb.TimeMicroseconds)}{ChatFormat.Reset}{behind} {ChatFormat.MutedColor}· {pb.Completions} finishes{ChatFormat.Reset}");
         }
         catch (Exception ex) { LogAndReply(ex, playerId, sessionId); }
     }
@@ -363,8 +366,9 @@ public sealed class RecordCommands(
             var segment = split.TimeMicroseconds - previous;
             previous = split.TimeMicroseconds;
             var reference = comparison?.FirstOrDefault(item => item.Checkpoint == split.Checkpoint);
-            var delta = reference is null ? string.Empty : $" • WR {(split.TimeMicroseconds >= reference.TimeMicroseconds ? "+" : "-")}{FormatDelta(Math.Abs(split.TimeMicroseconds - reference.TimeMicroseconds))}";
-            player.SendChat($"  CP{split.Checkpoint}: {TimerManager.FormatTime(split.TimeMicroseconds)} • segment {TimerManager.FormatTime(segment)}{delta}");
+            var slower = reference is not null && split.TimeMicroseconds >= reference.TimeMicroseconds;
+            var delta = reference is null ? string.Empty : $" · {(slower ? ChatFormat.ErrorColor : ChatFormat.SuccessColor)}WR {(slower ? "+" : "-")}{FormatDelta(Math.Abs(split.TimeMicroseconds - reference.TimeMicroseconds))}{ChatFormat.Reset}";
+            player.SendChat($"{ChatFormat.MutedColor}CP{split.Checkpoint} ·{ChatFormat.Reset} {TimerManager.FormatTime(split.TimeMicroseconds)} {ChatFormat.MutedColor}· segment {TimerManager.FormatTime(segment)}{ChatFormat.Reset}{delta}");
         }
     }
 
@@ -381,7 +385,7 @@ public sealed class RecordCommands(
             var matches = await records.FindPlayersAsync(query).ConfigureAwait(false);
             if (matches.Count == 0)
             {
-                ReplyNextTick(playerId, sessionId, $"[SurfTimer] No player found matching '{query}'.");
+                ReplyNextTick(playerId, sessionId, ChatFormat.Error($"No player found matching '{query}'."));
                 return null;
             }
             var exact = matches.FirstOrDefault(match =>
@@ -390,7 +394,7 @@ public sealed class RecordCommands(
             if (exact is not null) return exact;
             if (matches.Count == 1) return matches[0];
             ReplyNextTick(playerId, sessionId,
-                $"[SurfTimer] Multiple players match '{query}': {string.Join(", ", matches.Select(match => match.PlayerName))}");
+                ChatFormat.Warning($"Multiple players match '{query}': {string.Join(", ", matches.Select(match => match.PlayerName))}"));
             return null;
         }
         catch (Exception exception)
@@ -405,7 +409,7 @@ public sealed class RecordCommands(
     private void LogAndReply(Exception exception, int playerId, ulong sessionId)
     {
         logger.LogError(exception, "Record command failed.");
-        ReplyNextTick(playerId, sessionId, "[SurfTimer] The records database is unavailable.");
+        ReplyNextTick(playerId, sessionId, ChatFormat.Error("The records database is unavailable."));
     }
 
     private void ReplyNextTick(int playerId, ulong sessionId, string message) => core.Scheduler.NextTick(() =>

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SurfTimer.Chat;
 using SurfTimer.Configuration;
 using SurfTimer.Maps;
 using SwiftlyS2.Shared;
@@ -25,7 +26,9 @@ public sealed class MapVoteManager(
     private readonly Queue<string> _recentMaps = [];
     private IReadOnlyList<MapPoolEntry> _candidates = [];
     private CancellationTokenSource? _voteTimer;
+    private CancellationTokenSource? _forcedVoteTimer;
     private DateTimeOffset _rtvLockedUntil;
+    private bool _voteWasForced;
     private bool _started;
 
     public void Start()
@@ -52,8 +55,10 @@ public sealed class MapVoteManager(
         }
         core.Event.OnMapLoad += OnMapLoad;
         core.Event.OnMapUnload += OnMapUnload;
-        logger.LogInformation("SurfTimer map voting enabled; RTV={Rtv}, nominations={Nominations}.",
-            options.MapVoting.RockTheVoteEnabled, options.MapVoting.NominationEnabled);
+        logger.LogInformation(
+            "SurfTimer map voting enabled; RTV={Rtv}, nominations={Nominations}, forced vote={ForcedVote} after {Minutes} minutes.",
+            options.MapVoting.RockTheVoteEnabled, options.MapVoting.NominationEnabled,
+            options.MapVoting.EndOfMapVoteEnabled, options.MapVoting.ForceVoteAfterMinutes);
     }
 
     public void Stop()
@@ -61,6 +66,7 @@ public sealed class MapVoteManager(
         if (!_started) return;
         core.Event.OnMapLoad -= OnMapLoad;
         core.Event.OnMapUnload -= OnMapUnload;
+        CancelForcedVote();
         CancelVote();
         foreach (var alias in new[] { "sw_vote", "sw_rockthevote", "sw_nom" }) core.Command.UnregisterCommand(alias);
         foreach (var registration in _registrations) core.Command.UnregisterCommand(registration);
@@ -78,28 +84,33 @@ public sealed class MapVoteManager(
             while (_recentMaps.Count > options.MapVoting.RecentMapExclusionCount) _recentMaps.Dequeue();
         }
         _rtvLockedUntil = default;
-        _rtv.Clear(); _nominations.Clear(); CancelVote();
+        _rtv.Clear(); _nominations.Clear(); CancelVote(); CancelForcedVote();
+        ScheduleForcedVote(options.MapVoting.ForceVoteAfterMinutes);
     }
 
-    private void OnMapUnload(IOnMapUnloadEvent _) { _rtvLockedUntil = default; _rtv.Clear(); _nominations.Clear(); CancelVote(); }
+    private void OnMapUnload(IOnMapUnloadEvent _)
+    {
+        _rtvLockedUntil = default;
+        _rtv.Clear(); _nominations.Clear(); CancelForcedVote(); CancelVote();
+    }
 
     private void OnMaps(ICommandContext context)
     {
-        context.Reply($"[SurfTimer] Tier {options.MapVoting.MinimumTier}-{options.MapVoting.MaximumTier} maps: " +
-                      string.Join(", ", EligibleMaps().Select(map => map.Name)));
+        context.Reply(ChatFormat.Header($"Map Pool · Tier {options.MapVoting.MinimumTier}-{options.MapVoting.MaximumTier}"));
+        context.Reply(ChatFormat.Row("MAPS ·", string.Join(" · ", EligibleMaps().Select(map => map.Name))));
     }
 
     private void OnNominate(ICommandContext context)
     {
         if (context.Sender is null) { context.Reply("This command requires a player caller."); return; }
-        if (_voteTimer is not null) { context.Reply("[SurfTimer] A map vote is already running."); return; }
+        if (_voteTimer is not null) { context.Reply(ChatFormat.Warning("A map vote is already running.")); return; }
         if (context.Args.Length == 0) { OpenNominationMenu(context.Sender); return; }
-        if (context.Args.Length != 1) { context.Reply("[SurfTimer] Usage: !nominate [map]"); return; }
+        if (context.Args.Length != 1) { context.Reply(ChatFormat.Warning("Usage: !nominate [map]")); return; }
         var query = context.Args[0];
         var matches = EligibleMaps().Where(map => map.Name.Contains(query, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (matches.Length != 1) { context.Reply(matches.Length == 0 ? "[SurfTimer] Map not found." : "[SurfTimer] Be more specific."); return; }
+        if (matches.Length != 1) { context.Reply(matches.Length == 0 ? ChatFormat.Error("Map not found.") : ChatFormat.Warning("Be more specific.")); return; }
         if (string.Equals(matches[0].Name, maps.Current?.Name, StringComparison.OrdinalIgnoreCase))
-        { context.Reply("[SurfTimer] That map is currently running."); return; }
+        { context.Reply(ChatFormat.Warning("That map is currently running.")); return; }
         Nominate(context.Sender, matches[0]);
     }
 
@@ -107,7 +118,7 @@ public sealed class MapVoteManager(
     {
         var available = EligibleMaps()
             .Where(map => !map.Name.Equals(maps.Current?.Name, StringComparison.OrdinalIgnoreCase)).ToArray();
-        if (available.Length == 0) { player.SendChat("[SurfTimer] No maps are available to nominate."); return; }
+        if (available.Length == 0) { player.SendChat(ChatFormat.Error("No maps are available to nominate.")); return; }
         var builder = core.MenusAPI.CreateBuilder();
         builder.Design.SetMenuTitle("Nominate a map");
         builder.Design.SetMaxVisibleItems(5);
@@ -138,7 +149,7 @@ public sealed class MapVoteManager(
         core.Scheduler.NextTick(() =>
         {
             _nominations[steamId] = map.Name;
-            Broadcast($"[SurfTimer] {playerName} nominated {map.Name} (Tier {configuration.Tier}, {routeType}).");
+            Broadcast($"{ChatFormat.Prefix} {ChatFormat.SuccessColor}{playerName}{ChatFormat.Reset} nominated {map.Name} {ChatFormat.MutedColor}· Tier {configuration.Tier} · {routeType}{ChatFormat.Reset}");
         });
     }
 
@@ -148,14 +159,14 @@ public sealed class MapVoteManager(
         if (_rtvLockedUntil > DateTimeOffset.UtcNow)
         {
             var remaining = (int)Math.Ceiling((_rtvLockedUntil - DateTimeOffset.UtcNow).TotalMinutes);
-            context.Reply($"[SurfTimer] This map was extended; RTV is available again in {remaining} minute{(remaining == 1 ? "" : "s")}.");
+            context.Reply(ChatFormat.Warning($"This map was extended · RTV returns in {remaining} minute{(remaining == 1 ? "" : "s")}."));
             return;
         }
-        if (_voteTimer is not null) { context.Reply("[SurfTimer] A map vote is already running."); return; }
-        if (!_rtv.Add(context.Sender.SteamID)) { context.Reply("[SurfTimer] You have already rocked the vote."); return; }
+        if (_voteTimer is not null) { context.Reply(ChatFormat.Warning("A map vote is already running.")); return; }
+        if (!_rtv.Add(context.Sender.SteamID)) { context.Reply(ChatFormat.Warning("You have already rocked the vote.")); return; }
         var needed = RequiredRtvVotes();
-        Broadcast($"[SurfTimer] {context.Sender.Name} rocked the vote ({_rtv.Count}/{needed}).");
-        if (_rtv.Count >= needed) StartVote();
+        Broadcast($"{ChatFormat.Prefix} {context.Sender.Name} rocked the vote {ChatFormat.HighlightColor}{_rtv.Count}/{needed}{ChatFormat.Reset}");
+        if (_rtv.Count >= needed) StartVote(forced: false);
     }
 
     private int RequiredRtvVotes()
@@ -164,8 +175,10 @@ public sealed class MapVoteManager(
         return Math.Max(options.MapVoting.MinimumRtvVotes, (int)Math.Ceiling(humans * options.MapVoting.RtvThreshold));
     }
 
-    private void StartVote()
+    private void StartVote(bool forced)
     {
+        if (_voteTimer is not null) return;
+        CancelForcedVote();
         var excluded = _recentMaps.ToHashSet(StringComparer.OrdinalIgnoreCase);
         if (maps.Current is { } current) excluded.Add(current.Name);
         var pool = EligibleMaps().Where(map => !excluded.Contains(map.Name)).ToList();
@@ -175,16 +188,23 @@ public sealed class MapVoteManager(
         var remaining = pool.Where(map => nominated.All(value => !value.Name.Equals(map.Name, StringComparison.OrdinalIgnoreCase)))
             .OrderBy(_ => Random.Shared.Next()).ToList();
         _candidates = nominated.Concat(remaining).Take(options.MapVoting.CandidateCount).ToArray();
-        if (_candidates.Count < 2) { Broadcast("[SurfTimer] Not enough eligible maps to start a vote."); _rtv.Clear(); return; }
+        if (_candidates.Count < 2)
+        {
+            Broadcast(ChatFormat.Error("Not enough eligible maps to start a vote."));
+            _rtv.Clear();
+            ScheduleForcedVote(options.MapVoting.ForceVoteAfterMinutes);
+            return;
+        }
+        _voteWasForced = forced;
         _ballots.Clear();
-        Broadcast($"[SurfTimer] Map vote started for {options.MapVoting.VoteDurationSeconds} seconds:");
+        Broadcast(ChatFormat.Header($"Map Vote · {options.MapVoting.VoteDurationSeconds} seconds"));
         for (var i = 0; i < _candidates.Count; i++)
         {
             var candidate = _candidates[i];
             var tier = mapConfigurations.Load(candidate.Name).Value.Tier;
-            Broadcast($"  {i + 1}. {candidate.Name} (Tier {tier}) - !{i + 1}");
+            Broadcast($"{ChatFormat.HighlightColor}{i + 1}.{ChatFormat.Reset} {candidate.Name} {ChatFormat.MutedColor}· Tier {tier} · !{i + 1}{ChatFormat.Reset}");
         }
-        Broadcast($"  {ExtendMapChoice}. Extend Map ({options.MapVoting.ExtendMapMinutes} minutes) - !{ExtendMapChoice}");
+        Broadcast($"{ChatFormat.HighlightColor}{ExtendMapChoice}.{ChatFormat.Reset} Extend Map {ChatFormat.MutedColor}· {options.MapVoting.ExtendMapMinutes} minutes · !{ExtendMapChoice}{ChatFormat.Reset}");
         _voteTimer = core.Scheduler.DelayBySeconds(options.MapVoting.VoteDurationSeconds, () => FinishVote(fromTimeout: true));
     }
 
@@ -193,7 +213,7 @@ public sealed class MapVoteManager(
         if (context.Sender is null) { context.Reply("This command requires a player caller."); return; }
         if (context.Args.Length != 1 || !int.TryParse(context.Args[0], out var choice) ||
             (choice != ExtendMapChoice && (choice < 1 || choice > _candidates.Count)))
-        { context.Reply($"[SurfTimer] Usage: !mapvote <1-{_candidates.Count}|{ExtendMapChoice}>"); return; }
+        { context.Reply(ChatFormat.Warning($"Usage: !mapvote <1-{_candidates.Count}|{ExtendMapChoice}>")); return; }
         SubmitVote(context, choice);
     }
 
@@ -205,18 +225,18 @@ public sealed class MapVoteManager(
 
     private void SubmitVote(ICommandContext context, int choice)
     {
-        if (_voteTimer is null) { context.Reply("[SurfTimer] No map vote is running."); return; }
+        if (_voteTimer is null) { context.Reply(ChatFormat.Warning("No map vote is running.")); return; }
         var mapChoice = choice >= 1 && choice <= _candidates.Count;
         if (!mapChoice && choice != ExtendMapChoice)
-        { context.Reply($"[SurfTimer] Choose a listed map with !1 through !{_candidates.Count}, or !{ExtendMapChoice} to extend."); return; }
+        { context.Reply(ChatFormat.Warning($"Choose !1–!{_candidates.Count}, or !{ExtendMapChoice} to extend.")); return; }
         _ballots[context.Sender!.SteamID] = choice - 1;
         context.Reply(mapChoice
-            ? $"[SurfTimer] Voted for {_candidates[choice - 1].Name}."
-            : $"[SurfTimer] Voted to extend the map by {options.MapVoting.ExtendMapMinutes} minutes.");
+            ? ChatFormat.Success($"Voted for {_candidates[choice - 1].Name}.")
+            : ChatFormat.Success($"Voted to extend by {options.MapVoting.ExtendMapMinutes} minutes."));
         var humans = core.PlayerManager.GetAllValidPlayers().Where(player => !player.IsFakeClient).ToArray();
         if (humans.Length > 0 && humans.All(player => _ballots.ContainsKey(player.SteamID)))
         {
-            Broadcast("[SurfTimer] Every connected player has voted — closing the vote early.");
+            Broadcast(ChatFormat.Message("Every connected player has voted · closing early."));
             FinishVote(fromTimeout: false);
         }
     }
@@ -227,24 +247,67 @@ public sealed class MapVoteManager(
         _voteTimer = null;
         if (!fromTimeout) completedTimer?.Cancel();
         completedTimer?.Dispose();
-        if (_ballots.Count == 0) { Broadcast("[SurfTimer] Map vote ended with no votes."); ResetVoteState(); return; }
+        if (_ballots.Count == 0)
+        {
+            if (_voteWasForced && _candidates.Count > 0)
+            {
+                var fallback = _candidates[Random.Shared.Next(_candidates.Count)];
+                Broadcast(ChatFormat.Warning($"No votes cast · selected {fallback.Name} · changing in 8 seconds."));
+                logger.LogInformation("Forced map vote selected fallback {Map} (Workshop {WorkshopId}).",
+                    fallback.Name, fallback.WorkshopId);
+                ResetVoteState();
+                ChangeMapAfterDelay(fallback);
+                return;
+            }
+            Broadcast(ChatFormat.Warning("Map vote ended with no votes."));
+            ResetVoteState();
+            ScheduleForcedVote(options.MapVoting.ForceVoteAfterMinutes);
+            return;
+        }
         var winner = _ballots.Values.GroupBy(value => value).OrderByDescending(group => group.Count())
             .ThenBy(_ => Random.Shared.Next()).First();
         if (winner.Key == ExtendMapBallot)
         {
             _rtvLockedUntil = DateTimeOffset.UtcNow.AddMinutes(options.MapVoting.ExtendMapMinutes);
-            Broadcast($"[SurfTimer] Extend Map won with {winner.Count()} vote(s). RTV is locked for {options.MapVoting.ExtendMapMinutes} minutes.");
+            Broadcast(ChatFormat.Success($"Extend Map won with {winner.Count()} vote(s) · +{options.MapVoting.ExtendMapMinutes} minutes."));
             ResetVoteState();
+            ScheduleForcedVote(options.MapVoting.ExtendMapMinutes);
             return;
         }
         var map = _candidates[winner.Key];
-        Broadcast($"[SurfTimer] Vote won by {map.Name} with {winner.Count()} vote(s). Changing map in 8 seconds...");
+        Broadcast(ChatFormat.Success($"{map.Name} won with {winner.Count()} vote(s) · changing in 8 seconds."));
         logger.LogInformation("Map vote selected {Map} (Workshop {WorkshopId}).", map.Name, map.WorkshopId);
         ResetVoteState();
-        core.Scheduler.DelayBySeconds(8f, () => core.Engine.ExecuteCommand($"host_workshop_map {map.WorkshopId}"));
+        ChangeMapAfterDelay(map);
     }
 
-    private void ResetVoteState() { _rtv.Clear(); _nominations.Clear(); _ballots.Clear(); _candidates = []; }
+    private void ChangeMapAfterDelay(MapPoolEntry map) =>
+        core.Scheduler.DelayBySeconds(8f, () => core.Engine.ExecuteCommand($"host_workshop_map {map.WorkshopId}"));
+
+    private void ScheduleForcedVote(int minutes)
+    {
+        if (!options.MapVoting.EndOfMapVoteEnabled) return;
+        CancelForcedVote();
+        _forcedVoteTimer = core.Scheduler.DelayBySeconds(minutes * 60f, () =>
+        {
+            _forcedVoteTimer = null;
+            Broadcast(ChatFormat.Warning("Map time expired · starting the map vote."));
+            StartVote(forced: true);
+        });
+        logger.LogInformation("Forced map vote scheduled in {Minutes} minutes.", minutes);
+    }
+
+    private void CancelForcedVote()
+    {
+        var timer = _forcedVoteTimer;
+        _forcedVoteTimer = null;
+        if (timer is not null) { timer.Cancel(); timer.Dispose(); }
+    }
+
+    private void ResetVoteState()
+    {
+        _rtv.Clear(); _nominations.Clear(); _ballots.Clear(); _candidates = []; _voteWasForced = false;
+    }
     private void CancelVote()
     {
         var timer = _voteTimer;

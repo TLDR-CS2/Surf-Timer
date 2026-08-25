@@ -1,6 +1,6 @@
 # SurfTimer web API tests
 
-Run the read-only live integration suite against the local website:
+Run the read-only integration suite against a SurfTimer website instance:
 
 ```powershell
 .\tools\web-api\Test-WebApi.ps1

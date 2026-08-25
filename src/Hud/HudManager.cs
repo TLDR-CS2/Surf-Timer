@@ -25,6 +25,8 @@ public sealed class HudManager(
     private CancellationTokenSource? _timer;
     private readonly Dictionary<(ulong SteamId,string Map), CachedPb> _pbCache=[];
     private readonly HashSet<(ulong SteamId,string Map)> _pbRequests=[];
+    private readonly Dictionary<string,CachedStandings> _standingsCache=new(StringComparer.OrdinalIgnoreCase);
+    private readonly HashSet<string> _standingsRequests=new(StringComparer.OrdinalIgnoreCase);
 
     public void Start()
     {
@@ -83,9 +85,8 @@ public sealed class HudManager(
                 var target=watched.Player; var targetSession=watched.Session;
                 var targetElapsed=targetSession.ActiveBonus>0?targetSession.BonusRun.ElapsedAt(now):targetSession.Run.ElapsedAt(now);
                 var targetSpeed=GetHorizontalSpeed(target.PlayerPawn);
-                var pb=GetCachedPb(targetSession);
                 player.SendCenterHTML(BuildSpectatorHtml(targetSession,session.Preferences,target.Name,targetElapsed,targetSpeed,maxVelocity,
-                    checkpointCount,stageCount,(ulong)target.PressedButtons,spectatorCounts.GetValueOrDefault(target.PlayerID),pb),MessageDurationMilliseconds);
+                    checkpointCount,stageCount,(ulong)target.PressedButtons,spectatorCounts.GetValueOrDefault(target.PlayerID)),MessageDurationMilliseconds);
                 continue;
             }
             player.SendCenterHTML(
@@ -99,12 +100,13 @@ public sealed class HudManager(
         int horizontalSpeed,
         int maxVelocity,
         bool keysEnabled) =>
-        $"<font color='#ffd166' size='6'><b>{TimerManager.FormatTime(replay.ElapsedMicroseconds)}</b></font><br>" +
-        $"<font color='{GetSpeedColor(horizontalSpeed, maxVelocity)}' size='4'>{horizontalSpeed} u/s</font><br>" +
-        $"<font color='#c8c8c8' size='3'>REPLAY #{replay.Rank} | {System.Net.WebUtility.HtmlEncode(replay.PlayerName)} | {TimerManager.FormatTime(replay.TotalMicroseconds)}</font>" +
-        (keysEnabled ? $"<br><font color='#d8d8d8' size='3'>{BuildKeys(replay.Buttons)}</font>" : string.Empty);
+        $"<font class='fontSize-l horizontal-center' color='{GetSpeedColor(horizontalSpeed, maxVelocity)}'><b>{horizontalSpeed:0000}</b></font><br>" +
+        $"<font color='#ffd166'><b>{TimerManager.FormatTime(replay.ElapsedMicroseconds)}</b></font><br>" +
+        $"<font color='#8f9aa3'>REPLAY</font> <font color='#d8dde1'>#{replay.Rank} · {System.Net.WebUtility.HtmlEncode(replay.PlayerName)} · {TimerManager.FormatTime(replay.TotalMicroseconds)}</font>" +
+        (keysEnabled ? $"<br>{BuildKeysHtml(replay.Buttons)}" : string.Empty) +
+        "<br>";
 
-    private static string BuildHtml(
+    private string BuildHtml(
         SurfPlayerSession session,
         PlayerPreferences preferences,
         long elapsedMicroseconds,
@@ -114,74 +116,77 @@ public sealed class HudManager(
         int stageCount,
         ulong pressedButtons)
     {
-        var html = new StringBuilder(192);
-        html.Append("<font color='#58d6ff' size='6'><b>")
-            .Append(TimerManager.FormatTime(elapsedMicroseconds))
-            .Append("</b></font>");
+        var comparison = GetHudComparison(session, elapsedMicroseconds);
+        var html = new StringBuilder(320);
 
         if (preferences.SpeedEnabled)
         {
-            html.Append("<br><font color='")
+            html.Append("<font class='fontSize-l horizontal-center' color='")
                 .Append(GetSpeedColor(horizontalSpeed, maxVelocity))
-                .Append("' size='4'>")
-                .Append(horizontalSpeed)
-                .Append(" u/s</font>");
+                .Append("'><b>")
+                .Append(horizontalSpeed.ToString("0000"))
+                .Append("</b></font><br>");
         }
+
+        html.Append("<font color='#58d6ff'><b>")
+            .Append(TimerManager.FormatTime(elapsedMicroseconds))
+            .Append("</b></font>");
+        if (session.Run.State == RunState.Running && session.ActiveBonus == 0)
+            html.Append(" <font color='").Append(GetRankColor(comparison.ProjectedRank)).Append("'><b>[#")
+                .Append(comparison.ProjectedRank).Append("]</b></font>");
 
         if (preferences.StatusEnabled)
         {
-            html.Append("<br>");
-            if (session.ActiveBonus > 0)
-            {
-                html.Append("<font color='#c8c8c8' size='3'>Bonus ")
-                    .Append(session.ActiveBonus)
-                    .Append(" | </font>");
-            }
-            else if (stageCount > 0)
-            {
-                html.Append("<font color='#c8c8c8' size='3'>Stage ")
-                    .Append(Math.Max(1, session.Run.CurrentStage))
-                    .Append('/')
-                    .Append(stageCount)
-                    .Append(" | </font>");
-            }
-            else if (checkpointCount > 0)
-            {
-                html.Append("<font color='#c8c8c8' size='3'>Checkpoint ")
-                    .Append(session.Run.LastCheckpoint)
-                    .Append('/')
-                    .Append(checkpointCount)
-                    .Append(" | </font>");
-            }
-
             var activeRun = session.ActiveBonus > 0 ? session.BonusRun : session.Run;
             var (stateText, stateColor) = session.Practice.IsActive
                 ? (session.Practice.IsNoclip ? "Practice | Noclip" : "Practice", "#ffd166")
                 : GetRunStateDisplay(activeRun.State);
-            html.Append("<font color='")
-                .Append(stateColor)
-                .Append("' size='3'>")
-                .Append(stateText)
-                .Append("</font>");
+            html.Append(" <font color='#68737c'>· </font><font color='#aab2b8'>");
+            if (session.ActiveBonus > 0)
+                html.Append("BONUS ").Append(session.ActiveBonus).Append(" · ");
+            else if (stageCount > 0)
+                html.Append("STAGE ").Append(Math.Max(1, session.Run.CurrentStage)).Append('/').Append(stageCount).Append(" · ");
+            html.Append("</font><font color='").Append(stateColor).Append("'><b>")
+                .Append(stateText.ToUpperInvariant()).Append("</b></font>");
         }
 
+        html.Append("<br><nobr><font color='#7f8991'>PB&#160;</font><font color='#d2d7db'>")
+            .Append(comparison.PersonalBest is null ? "--:--.---" : TimerManager.FormatTime(comparison.PersonalBest.Time))
+            .Append("&#160;[")
+            .Append(comparison.PersonalBest is null ? "-" : comparison.PersonalBest.Rank)
+            .Append('/').Append(comparison.TotalRecords)
+            .Append("]&#160;</font><font color='#68737c'>·</font><font color='#aab2b8'>&#160;T")
+            .Append(maps.Current?.Configuration.Tier ?? 1)
+            .Append("&#160;·&#160;").Append(stageCount > 0 ? "STAGED" : "LINEAR")
+            .Append("</font></nobr>");
+
         if (preferences.KeysEnabled)
-            html.Append("<br><font color='#d8d8d8' size='3'>")
-                .Append(BuildKeys(pressedButtons)).Append("</font>");
+            html.Append("<br>").Append(BuildKeysHtml(pressedButtons));
+        // CS2's center-HTML panel drops/clips the final line unless the
+        // message ends with a break. Keep the disposable empty line last.
+        html.Append("<br>");
         return html.ToString();
     }
 
-    private static string BuildSpectatorHtml(SurfPlayerSession target,PlayerPreferences viewerPreferences,string targetName,
-        long elapsed,int speed,int maxVelocity,int checkpoints,int stages,ulong buttons,int spectators,CachedPb? pb)
+    private string BuildSpectatorHtml(SurfPlayerSession target,PlayerPreferences viewerPreferences,string targetName,
+        long elapsed,int speed,int maxVelocity,int checkpoints,int stages,ulong buttons,int spectators)
     {
         var html=new StringBuilder(320);
         html.Append("<font color='#ffd166' size='3'>SPECTATING ").Append(System.Net.WebUtility.HtmlEncode(targetName)).Append("</font><br>");
         html.Append(BuildHtml(target,viewerPreferences,elapsed,speed,maxVelocity,checkpoints,stages,buttons));
-        html.Append("<br><font color='#c8c8c8' size='3'>");
-        if(pb is null) html.Append("PB: --");
-        else html.Append("PB: ").Append(TimerManager.FormatTime(pb.Time)).Append(" | Rank #").Append(pb.Rank);
-        html.Append(" | Spectators: ").Append(spectators).Append("</font>");
+        html.Append("<font color='#c8c8c8' size='3'>");
+        html.Append("Spectators: ").Append(spectators).Append("</font><br>");
         return html.ToString();
+    }
+
+    private HudComparison GetHudComparison(SurfPlayerSession target,long elapsed)
+    {
+        var map=maps.Current?.Name;
+        if(string.IsNullOrWhiteSpace(map)) return new(null,1,0);
+        RequestStandings(map);
+        var times=_standingsCache.TryGetValue(map,out var standings)?standings.Times:[];
+        var projected=target.Run.State==RunState.Running?1+CountFaster(times,elapsed):1;
+        return new(GetCachedPb(target),projected,times.Count);
     }
 
     private CachedPb? GetCachedPb(SurfPlayerSession target)
@@ -189,7 +194,7 @@ public sealed class HudManager(
         var map=maps.Current?.Name;
         if(!target.IsAuthorized || string.IsNullOrWhiteSpace(map)) return null;
         var key=(target.SteamId,map);
-        if(_pbCache.TryGetValue(key,out var cached) && DateTimeOffset.UtcNow-cached.LoadedAt<TimeSpan.FromSeconds(15)) return cached;
+        if(_pbCache.TryGetValue(key,out var cached) && DateTimeOffset.UtcNow-cached.LoadedAt<TimeSpan.FromSeconds(30)) return cached;
         if(_pbRequests.Add(key)) _=LoadPbAsync(key);
         return cached;
     }
@@ -198,10 +203,10 @@ public sealed class HudManager(
     {
         try
         {
-            var pb=await records.GetPersonalBestAsync(key.SteamId,key.Map).ConfigureAwait(false);
+            var pb=await records.GetPersonalBestDetailsAsync(key.SteamId,key.Map).ConfigureAwait(false);
             core.Scheduler.NextTick(()=>
             {
-                if(pb is not null) _pbCache[key]=new(pb.TimeMicroseconds,pb.Rank,DateTimeOffset.UtcNow);
+                if(pb is not null) _pbCache[key]=new(pb.TimeMicroseconds,pb.Rank,pb.TotalRecords,DateTimeOffset.UtcNow);
                 else _pbCache.Remove(key);
                 _pbRequests.Remove(key);
             });
@@ -211,6 +216,41 @@ public sealed class HudManager(
             logger.LogWarning(exception,"Could not refresh spectator PB for {SteamId} on {Map}.",key.SteamId,key.Map);
             core.Scheduler.NextTick(()=>_pbRequests.Remove(key));
         }
+    }
+
+    private void RequestStandings(string map)
+    {
+        if(_standingsCache.TryGetValue(map,out var cached) && DateTimeOffset.UtcNow-cached.LoadedAt<TimeSpan.FromSeconds(15)) return;
+        if(_standingsRequests.Add(map)) _=LoadStandingsAsync(map);
+    }
+
+    private async Task LoadStandingsAsync(string map)
+    {
+        try
+        {
+            var times=await records.GetRankedTimesAsync(map).ConfigureAwait(false);
+            core.Scheduler.NextTick(()=>
+            {
+                _standingsCache[map]=new(times,DateTimeOffset.UtcNow);
+                _standingsRequests.Remove(map);
+            });
+        }
+        catch(Exception exception)
+        {
+            logger.LogWarning(exception,"Could not refresh live standings for {Map}.",map);
+            core.Scheduler.NextTick(()=>_standingsRequests.Remove(map));
+        }
+    }
+
+    private static int CountFaster(IReadOnlyList<long> times,long elapsed)
+    {
+        var low=0; var high=times.Count;
+        while(low<high)
+        {
+            var middle=low+((high-low)/2);
+            if(times[middle]<elapsed) low=middle+1; else high=middle;
+        }
+        return low;
     }
 
     private static bool TryGetObserved(IPlayer viewer,out IPlayer target)
@@ -229,13 +269,25 @@ public sealed class HudManager(
         catch { return false; }
     }
 
-    private sealed record CachedPb(long Time,int Rank,DateTimeOffset LoadedAt);
+    private sealed record CachedPb(long Time,int Rank,int Total,DateTimeOffset LoadedAt);
+    private sealed record CachedStandings(IReadOnlyList<long> Times,DateTimeOffset LoadedAt);
+    private sealed record HudComparison(CachedPb? PersonalBest,int ProjectedRank,int TotalRecords);
 
-    private static string BuildKeys(ulong buttons) =>
-        $"{Key(buttons, 512, 'A')} {Key(buttons, 8, 'W')} {Key(buttons, 1024, 'D')} " +
-        $"{Key(buttons, 16, 'S')} {Key(buttons, 2, 'J')} {Key(buttons, 4, 'C')}";
+    private static string BuildKeysHtml(ulong buttons) =>
+        $"<font class='stratum-light-mono'>{KeyHtml(buttons,512,'A')} {KeyHtml(buttons,8,'W')} {KeyHtml(buttons,1024,'D')} " +
+        $"{KeyHtml(buttons,16,'S')} {KeyHtml(buttons,2,'J')} {KeyHtml(buttons,4,'C')}</font>";
 
-    private static char Key(ulong buttons, ulong flag, char label) => (buttons & flag) != 0 ? label : '_';
+    private static string KeyHtml(ulong buttons,ulong flag,char label) =>
+        (buttons&flag)!=0
+            ? $"<font color='#f4f7f8'><b>[{label}]</b></font>"
+            : $"<font color='#59636b'>[{label}]</font>";
+
+    private static string GetRankColor(int rank) => rank switch
+    {
+        1 => "#ffd166",
+        <= 10 => "#c792ea",
+        _ => "#aab2b8"
+    };
 
     private static (string Text, string Color) GetRunStateDisplay(RunState state) => state switch
     {

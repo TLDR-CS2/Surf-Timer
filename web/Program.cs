@@ -89,7 +89,7 @@ app.Use(async(context,next)=>
 });
 app.UseRateLimiter();app.UseDefaultFiles(); app.UseStaticFiles(new StaticFileOptions{OnPrepareResponse=ctx=>ctx.Context.Response.Headers.CacheControl="public,max-age=300"});
 
-app.MapGet("/api/version",()=>Results.Ok(new{service="SurfTimer.Web",version="0.1.0",environment=app.Environment.EnvironmentName,startedAt,framework=System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,cache=new{recordsSeconds=recordCacheSeconds,metadataSeconds=metadataCacheSeconds},rateLimit=new{requestsPerMinute=rateLimit}}));
+app.MapGet("/api/version",()=>Results.Ok(new{service="SurfTimer.Web",version="1.0.0",environment=app.Environment.EnvironmentName,startedAt,framework=System.Runtime.InteropServices.RuntimeInformation.FrameworkDescription,cache=new{recordsSeconds=recordCacheSeconds,metadataSeconds=metadataCacheSeconds},rateLimit=new{requestsPerMinute=rateLimit}}));
 
 app.MapGet("/api/health",async(Database database,CancellationToken token)=>
 {

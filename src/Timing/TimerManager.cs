@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SurfTimer.Chat;
 using SurfTimer.Players;
 using SurfTimer.Maps;
 using SwiftlyS2.Shared;
@@ -57,7 +58,7 @@ public sealed class TimerManager(
             session.Run.Invalidate(RunInvalidationReason.BonusTeleport, $"bonus={bonus}");
             if (session.ActiveBonus != bonus) session.SelectBonus(bonus);
             if (session.BonusRun.EnterStartZone())
-                player.SendChat($"[SurfTimer] Bonus {bonus} ready — leave the start zone to begin.");
+                player.SendChat(ChatFormat.Success($"Bonus {bonus} ready · leave the start zone to begin."));
             return;
         }
 
@@ -65,7 +66,7 @@ public sealed class TimerManager(
         {
             if (session.ActiveBonus == bonus && session.BonusRun.Finish(Now(), out var bonusElapsed))
             {
-                player.SendChat($"[SurfTimer] Bonus {bonus} finished in {FormatTime(bonusElapsed)}");
+                player.SendChat($"{ChatFormat.Prefix} {ChatFormat.RouteColor}BONUS {bonus} FINISHED{ChatFormat.Reset} · {ChatFormat.SuccessColor}{FormatTime(bonusElapsed)}{ChatFormat.Reset}");
                 var map = maps.Current;
                 if (player.SteamID != 0 && map is not null)
                 {
@@ -110,7 +111,7 @@ public sealed class TimerManager(
             }
             if (session.Run.EnterStartZone())
             {
-                player.SendChat("[SurfTimer] Ready — leave the start zone to begin.");
+                player.SendChat(ChatFormat.Success("Ready · leave the start zone to begin."));
             }
             return;
         }
@@ -127,7 +128,8 @@ public sealed class TimerManager(
             }
             if (session.Run.TryCheckpoint(checkpoint, Now(), out var split))
             {
-                player.SendChat($"[SurfTimer] Checkpoint {checkpoint}/{GetCheckpointCount()} — {FormatTime(split)}");
+                _ = SendCheckpointCompletedAsync(player.PlayerID, player.SessionId, player.SteamID,
+                    maps.Current?.Name ?? string.Empty, checkpoint, split);
             }
             return;
         }
@@ -160,7 +162,7 @@ public sealed class TimerManager(
                 _ = SendStageCompletedAsync(player.PlayerID, player.SessionId, player.SteamID,
                     maps.Current?.Name ?? string.Empty, maps.StageCount, finalStageTime, elapsed);
             var formatted = FormatTime(elapsed);
-            player.SendChat($"[SurfTimer] Finished in {formatted}");
+            player.SendChat($"{ChatFormat.Prefix} FINISHED · {ChatFormat.SuccessColor}{formatted}{ChatFormat.Reset}");
             logger.LogInformation("Run finished: {Name} ({SteamId}) on {Map} in {ElapsedMicroseconds}us.",
                 player.Name, player.SteamID,
                 core.Engine.GlobalVars.MapName.ToString(), elapsed);
@@ -195,7 +197,7 @@ public sealed class TimerManager(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is not null && player.SessionId == sessionId)
-                    player.SendChat($"[SurfTimer] Stage {stage} completed — Stage: {FormatTime(stageTime)} | Total: {FormatTime(cumulative)}{pbDelta}{wrDelta}");
+                    player.SendChat($"{ChatFormat.Prefix} {ChatFormat.RouteColor}STAGE {stage} COMPLETE{ChatFormat.Reset} · {FormatTime(stageTime)} · Total {FormatTime(cumulative)}{pbDelta}{wrDelta}");
             });
         }
         catch (Exception exception)
@@ -205,13 +207,48 @@ public sealed class TimerManager(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is not null && player.SessionId == sessionId)
-                    player.SendChat($"[SurfTimer] Stage {stage} completed — Stage: {FormatTime(stageTime)} | Total: {FormatTime(cumulative)}");
+                    player.SendChat($"{ChatFormat.Prefix} {ChatFormat.RouteColor}STAGE {stage} COMPLETE{ChatFormat.Reset} · {FormatTime(stageTime)} · Total {FormatTime(cumulative)}");
             });
         }
     }
 
-    private static string FormatSignedComparison(string label, long delta) =>
-        $" | {label} {(delta <= 0 ? "-" : "+")}{FormatTime(Math.Abs(delta))}";
+    private async Task SendCheckpointCompletedAsync(
+        int playerId, ulong sessionId, ulong steamId, string map, int checkpoint, long cumulative)
+    {
+        try
+        {
+            var comparison = await records.GetMapRunComparisonAsync(steamId, map).ConfigureAwait(false);
+            var pbSplit = comparison.PersonalBest?.Splits.FirstOrDefault(value => value.Checkpoint == checkpoint);
+            var wrSplit = comparison.WorldRecord?.Splits.FirstOrDefault(value => value.Checkpoint == checkpoint);
+            var pbDelta = pbSplit is null ? string.Empty : FormatSignedComparison("PB", cumulative - pbSplit.TimeMicroseconds);
+            var wrDelta = wrSplit is null ? string.Empty : FormatSignedComparison("WR", cumulative - wrSplit.TimeMicroseconds);
+            core.Scheduler.NextTick(() =>
+            {
+                var player = core.PlayerManager.GetPlayer(playerId);
+                if (player is not null && player.SessionId == sessionId)
+                    player.SendChat($"{ChatFormat.Prefix} CHECKPOINT {checkpoint}/{GetCheckpointCount()} · {FormatTime(cumulative)}{pbDelta}{wrDelta}");
+            });
+        }
+        catch (Exception exception)
+        {
+            logger.LogError(exception, "Failed to load checkpoint {Checkpoint} comparisons for {SteamId} on {Map}.", checkpoint, steamId, map);
+            core.Scheduler.NextTick(() =>
+            {
+                var player = core.PlayerManager.GetPlayer(playerId);
+                if (player is not null && player.SessionId == sessionId)
+                    player.SendChat($"{ChatFormat.Prefix} CHECKPOINT {checkpoint}/{GetCheckpointCount()} · {FormatTime(cumulative)}");
+            });
+        }
+    }
+
+    private static string FormatSignedComparison(string label, long delta)
+    {
+        const char defaultColor = '\u0001';
+        const char red = '\u0002';
+        const char green = '\u0004';
+        var color = delta <= 0 ? green : red;
+        return $" | {color}[{label} {(delta <= 0 ? "-" : "+")}{FormatTime(Math.Abs(delta))}]{defaultColor}";
+    }
 
     private static IReadOnlyList<long> BuildStageTimes(PlayerRun run, long elapsed, int stageCount)
     {
@@ -246,20 +283,20 @@ public sealed class TimerManager(
                     var improvement = result.PreviousBestMicroseconds is { } previous
                         ? $" (-{FormatTime(previous - result.BestMicroseconds)})"
                         : string.Empty;
-                    player.SendChat($"[SurfTimer] New PB: {FormatTime(result.BestMicroseconds)}{improvement} — global rank #{result.Rank}{(mapPoints?.Group is null ? string.Empty : $" — {mapPoints.Group}")}");
+                    player.SendChat($"{ChatFormat.Prefix} {ChatFormat.SuccessColor}NEW PB · {FormatTime(result.BestMicroseconds)}{ChatFormat.Reset}{improvement} · {ChatFormat.Rank(result.Rank)}{(mapPoints?.Group is null ? string.Empty : $" · {mapPoints.Group}")}");
                 }
                 else
                 {
-                    player.SendChat($"[SurfTimer] PB: {FormatTime(result.BestMicroseconds)} — global rank #{result.Rank}{(mapPoints?.Group is null ? string.Empty : $" — {mapPoints.Group}")}");
+                    player.SendChat($"{ChatFormat.Prefix} PB · {ChatFormat.SuccessColor}{FormatTime(result.BestMicroseconds)}{ChatFormat.Reset} · {ChatFormat.Rank(result.Rank)}{(mapPoints?.Group is null ? string.Empty : $" · {mapPoints.Group}")}");
                 }
                 if (mapPoints is not null)
-                    player.SendChat($"[SurfTimer] Map points: {mapPoints.Points:N0} — global points: {overall?.Points ?? 0:N0}");
+                    player.SendChat(ChatFormat.Row("POINTS ·", $"Map {mapPoints.Points:N0} · Global {overall?.Points ?? 0:N0}"));
                 foreach (var stage in result.Stages.Where(value => value.IsPersonalBest))
                 {
                     var improvement = stage.PreviousBestMicroseconds is { } previous
                         ? $" (-{FormatTime(previous - stage.BestMicroseconds)})"
                         : string.Empty;
-                    player.SendChat($"[SurfTimer] New Stage {stage.Stage} PB: {FormatTime(stage.BestMicroseconds)}{improvement} — global rank #{stage.Rank}");
+                    player.SendChat($"{ChatFormat.Prefix} {ChatFormat.RouteColor}NEW STAGE {stage.Stage} PB{ChatFormat.Reset} · {ChatFormat.SuccessColor}{FormatTime(stage.BestMicroseconds)}{ChatFormat.Reset}{improvement} · {ChatFormat.Rank(stage.Rank)}");
                 }
             });
         }
@@ -284,7 +321,7 @@ public sealed class TimerManager(
                 player.SendChat(result.IsPersonalBest
                     ? $"[SurfTimer] New Bonus {run.Bonus} PB: {FormatTime(result.BestMicroseconds)}{improvement} — global rank #{result.Rank} — +{SurfPointsPolicy.BonusRoutePoints} points"
                     : $"[SurfTimer] Bonus {run.Bonus} PB: {FormatTime(result.BestMicroseconds)} — global rank #{result.Rank}");
-                player.SendChat($"[SurfTimer] Global points: {overall?.Points ?? 0:N0}");
+                player.SendChat(ChatFormat.Row("GLOBAL POINTS ·", $"{overall?.Points ?? 0:N0}"));
             });
         }
         catch (Exception exception)
@@ -304,7 +341,7 @@ public sealed class TimerManager(
                 touch.Value.Session.BonusRun.Start(Now()))
             {
                 replays.Begin(touch.Value.Player.SessionId, touch.Value.Player.PlayerID);
-                touch.Value.Player.SendChat($"[SurfTimer] Bonus {bonus} timer started.");
+                touch.Value.Player.SendChat(ChatFormat.Success($"Bonus {bonus} timer started."));
             }
             return;
         }
@@ -313,7 +350,7 @@ public sealed class TimerManager(
         if (touch.Value.Session.Run.LeaveStartZone() && touch.Value.Session.Run.Start(Now()))
         {
             replays.Begin(touch.Value.Player.SessionId, touch.Value.Player.PlayerID);
-            touch.Value.Player.SendChat("[SurfTimer] Timer started.");
+            touch.Value.Player.SendChat(ChatFormat.Success("Timer started."));
         }
     }
 
@@ -325,7 +362,7 @@ public sealed class TimerManager(
         replays.Cancel(session.SessionId);
         session.Run.Invalidate(reason, details);
         session.ClearBonus();
-        player.SendChat($"[SurfTimer] Run rejected — {playerMessage}.");
+        player.SendChat(ChatFormat.Error($"Run rejected · {playerMessage}."));
         logger.LogWarning("Run invalidated: {Name} ({SteamId}) reason={Reason} details={Details} map={Map}.",
             player.Name, player.SteamID, reason, details, maps.Current?.Name ?? "none");
     }

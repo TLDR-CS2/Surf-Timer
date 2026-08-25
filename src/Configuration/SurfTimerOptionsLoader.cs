@@ -43,7 +43,7 @@ internal static class SurfTimerOptionsLoader
             throw new InvalidDataException("SurfTimer.MapVoting.RtvThreshold must be greater than 0 and at most 1.");
         if (voting.MinimumRtvVotes < 1 || voting.VoteDurationSeconds is < 5 or > 120 ||
             voting.CandidateCount is < 2 or > 5 || voting.RecentMapExclusionCount is < 0 or > 20 ||
-            voting.ExtendMapMinutes is < 1 or > 120)
+            voting.ExtendMapMinutes is < 1 or > 120 || voting.ForceVoteAfterMinutes is < 1 or > 240)
             throw new InvalidDataException("SurfTimer.MapVoting contains an out-of-range numeric setting.");
         if (voting.MinimumTier is < 1 or > 7 || voting.MaximumTier is < 1 or > 7 ||
             voting.MinimumTier > voting.MaximumTier)

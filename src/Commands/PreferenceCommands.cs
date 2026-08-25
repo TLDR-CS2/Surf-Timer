@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SurfTimer.Chat;
 using SurfTimer.Players;
 using SurfTimer.Storage;
 using SwiftlyS2.Shared;
@@ -43,9 +44,9 @@ public sealed class PreferenceCommands(
     {
         if (!TrySession(context, out var session)) return;
         var value = session.Preferences;
-        context.Reply($"[SurfTimer] Settings — HUD {OnOff(value.HudEnabled)} | speed {OnOff(value.SpeedEnabled)} | " +
-                      $"status {OnOff(value.StatusEnabled)} | keys {OnOff(value.KeysEnabled)} | " +
-                      $"sounds {OnOff(value.SoundsEnabled)} | replay HUD {OnOff(value.ReplayHudEnabled)}");
+        context.Reply(ChatFormat.Header("Your Settings"));
+        context.Reply(ChatFormat.Row("HUD ·", $"Timer {ChatFormat.OnOff(value.HudEnabled)} · Speed {ChatFormat.OnOff(value.SpeedEnabled)} · Status {ChatFormat.OnOff(value.StatusEnabled)}"));
+        context.Reply(ChatFormat.Row("DISPLAY ·", $"Keys {ChatFormat.OnOff(value.KeysEnabled)} · Replay HUD {ChatFormat.OnOff(value.ReplayHudEnabled)} · Sounds {ChatFormat.OnOff(value.SoundsEnabled)}"));
     }
 
     private void Toggle(ICommandContext context, Preference preference)
@@ -56,7 +57,7 @@ public sealed class PreferenceCommands(
         if (enabled is null) return;
         var updated = Set(session.Preferences, preference, enabled.Value);
         session.SetPreferences(updated);
-        context.Reply($"[SurfTimer] {Label(preference)}: {OnOff(enabled.Value)}");
+        context.Reply(ChatFormat.Message($"{Label(preference)} · {ChatFormat.OnOff(enabled.Value)}"));
         _ = SaveAsync(session.SteamId, updated);
     }
 
@@ -76,7 +77,7 @@ public sealed class PreferenceCommands(
         { context.Reply("This command requires a player caller."); return false; }
         session = players.Get(context.Sender.PlayerID)!;
         if (session is null || !session.IsAuthorized || session.SteamId == 0)
-        { context.Reply("[SurfTimer] Your Steam account is not authorized yet."); return false; }
+        { context.Reply(ChatFormat.Error("Your Steam account is not authorized yet.")); return false; }
         return true;
     }
 
@@ -85,7 +86,7 @@ public sealed class PreferenceCommands(
         if (args.Length == 0) return !current;
         if (args[0].Equals("on", StringComparison.OrdinalIgnoreCase) || args[0] == "1") return true;
         if (args[0].Equals("off", StringComparison.OrdinalIgnoreCase) || args[0] == "0") return false;
-        context.Reply("[SurfTimer] Use on or off, or omit the value to toggle.");
+        context.Reply(ChatFormat.Warning("Use on or off, or omit the value to toggle."));
         return null;
     }
 
@@ -111,6 +112,5 @@ public sealed class PreferenceCommands(
         Preference.Hud => "Timer HUD", Preference.Speed => "Speed display", Preference.Status => "Run status",
         Preference.Keys => "Key display", Preference.Sounds => "Sounds", _ => "Replay HUD"
     };
-    private static string OnOff(bool value) => value ? "ON" : "OFF";
     private enum Preference { Hud, Speed, Status, Keys, Sounds, ReplayHud }
 }

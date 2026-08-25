@@ -15,7 +15,9 @@
       "Enabled": true,
       "RockTheVoteEnabled": true,
       "NominationEnabled": true,
-      "EndOfMapVoteEnabled": false,
+      "EndOfMapVoteEnabled": true,
+      // Minutes from map load until the automatic vote begins.
+      "ForceVoteAfterMinutes": 15,
       "RtvThreshold": 0.60,
       "MinimumRtvVotes": 1,
       "VoteDurationSeconds": 60,

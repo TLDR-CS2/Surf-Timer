@@ -7,6 +7,8 @@
     "HudRefreshRateHz": 64,
     "MapVoting": {
       "Enabled": true,
+      "EndOfMapVoteEnabled": true,
+      "ForceVoteAfterMinutes": 30,
       "ExtendMapMinutes": 20,
       "MinimumTier": 1,
       "MaximumTier": 7

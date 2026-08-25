@@ -7,10 +7,10 @@ By default it selects `surf_*`, style `0`, mode `Standard`. Use `--mode Custom` 
 ```powershell
 $env:SURFTIMER_IMPORT_SOURCE = 'Server=127.0.0.1;Database=sharptimer;User ID=...;Password=...'
 $env:SURFTIMER_IMPORT_TARGET = 'Server=127.0.0.1;Database=surftimer;User ID=...;Password=...'
-& '.\.research\.dotnet\dotnet.exe' run --project '.\tools\sharptimer-import' -- --mode Standard
+dotnet run --project tools/sharptimer-import -- --mode Standard
 
 # After reviewing the dry-run counts:
-& '.\.research\.dotnet\dotnet.exe' run --project '.\tools\sharptimer-import' -- --mode Standard --commit
+dotnet run --project tools/sharptimer-import -- --mode Standard --commit
 ```
 
 If both schemas are in the same database, omit `SURFTIMER_IMPORT_TARGET`. For a prefixed SharpTimer player table, pass its full table name with `--player-stats PlayerStats_yourprefix`.

@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Logging;
+using SurfTimer.Chat;
 using SurfTimer.Maps;
 using SurfTimer.Storage;
 using SurfTimer.Timing;
@@ -50,32 +51,34 @@ public sealed class PublicCommands(
 
     private static void OnHelp(ICommandContext context)
     {
-        context.Reply("[SurfTimer] Core — !r/!restart | !pb [player] | !rank [player] | !top/!top10 | !wr | !mapinfo");
-        context.Reply("[SurfTimer] Overall — !points [player] | !ranks | !profile [player] | !mapstats");
-        context.Reply("[SurfTimer] Stats — !profile [player] | !mapstats");
-        context.Reply("[SurfTimer] Replay — !replay [1-10] | !breplay <bonus> [rank] | !stagereplay <stage> [rank] | !replay stop");
-        context.Reply("[SurfTimer] Routes — !stages | !bonuses | !s <stage> | !rs | !b <bonus> | !rb");
-        context.Reply("[SurfTimer] Practice — !saveloc | !tele | !teleprev | !telenext | !noclip | !ncspeed");
-        context.Reply("[SurfTimer] Settings — !settings | !hud | !speed | !status | !keys | !sounds | !replayhud");
-        context.Reply("[SurfTimer] Add 'on' or 'off' to a setting command, or omit it to toggle.");
+        context.Reply(ChatFormat.Header("Player Commands"));
+        context.Reply(ChatFormat.Row("TIMER ·", "!r · !pb · !rank · !top10 · !wr · !mapinfo"));
+        context.Reply(ChatFormat.Row("GLOBAL ·", "!points · !ranks · !profile · !mapstats"));
+        context.Reply(ChatFormat.Row("REPLAYS ·", "!replay · !breplay · !stagereplay"));
+        context.Reply(ChatFormat.Row("ROUTES ·", "!stages · !bonuses · !s · !rs · !b · !rb"));
+        context.Reply(ChatFormat.Row("PRACTICE ·", "!saveloc · !tele · !teleprev · !telenext · !noclip · !ncspeed"));
+        context.Reply(ChatFormat.Row("SETTINGS ·", "!settings · !hud · !speed · !status · !keys · !sounds · !replayhud"));
+        context.Reply(ChatFormat.Row("TIP ·", "Use on/off after a setting, or omit it to toggle.", ChatFormat.MutedColor));
     }
 
     private void OnStages(ICommandContext context)
     {
-        if (maps.Current is null) { context.Reply("[SurfTimer] No map is active."); return; }
+        if (maps.Current is null) { context.Reply(ChatFormat.Error("No map is active.")); return; }
         if (maps.StageCount <= 0)
-        { context.Reply($"[SurfTimer] {maps.Current.Name} is linear and has no timed stages."); return; }
-        context.Reply($"[SurfTimer] {maps.Current.Name} has {maps.StageCount} stages.");
-        context.Reply("[SurfTimer] !s <stage> · !rs · !stagepb <stage> · !stagewr <stage> · !stagetop <stage> · !stagereplay <stage> [rank]");
+        { context.Reply(ChatFormat.Message($"{maps.Current.Name} is linear and has no timed stages.")); return; }
+        context.Reply(ChatFormat.Header($"Stages · {maps.Current.Name}"));
+        context.Reply(ChatFormat.Row("ROUTE ·", $"{maps.StageCount} timed stages", ChatFormat.RouteColor));
+        context.Reply(ChatFormat.Row("COMMANDS ·", "!s · !rs · !stagepb · !stagewr · !stagetop · !stagereplay"));
     }
 
     private void OnBonuses(ICommandContext context)
     {
-        if (maps.Current is null) { context.Reply("[SurfTimer] No map is active."); return; }
+        if (maps.Current is null) { context.Reply(ChatFormat.Error("No map is active.")); return; }
         if (maps.BonusCount <= 0)
-        { context.Reply($"[SurfTimer] {maps.Current.Name} has no configured bonuses."); return; }
-        context.Reply($"[SurfTimer] {maps.Current.Name} has {maps.BonusCount} bonuses: {string.Join(", ", Enumerable.Range(1, maps.BonusCount).Select(value => $"B{value}"))}.");
-        context.Reply("[SurfTimer] !b <bonus> · !rb · !bonuspb <bonus> · !bonuswr <bonus> · !bonustop <bonus> · !breplay <bonus> [rank]");
+        { context.Reply(ChatFormat.Message($"{maps.Current.Name} has no configured bonuses.")); return; }
+        context.Reply(ChatFormat.Header($"Bonuses · {maps.Current.Name}"));
+        context.Reply(ChatFormat.Row("ROUTES ·", string.Join(" · ", Enumerable.Range(1, maps.BonusCount).Select(value => $"B{value}")), ChatFormat.RouteColor));
+        context.Reply(ChatFormat.Row("COMMANDS ·", "!b · !rb · !bonuspb · !bonuswr · !bonustop · !breplay"));
     }
 
     private void OnMapInfo(ICommandContext context)
@@ -88,7 +91,7 @@ public sealed class PublicCommands(
         var map = maps.Current;
         if (map is null)
         {
-            context.Reply("[SurfTimer] No map is active.");
+            context.Reply(ChatFormat.Error("No map is active."));
             return;
         }
         var playerId = context.Sender.PlayerID;
@@ -107,11 +110,12 @@ public sealed class PublicCommands(
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is null || player.SessionId != sessionId) return;
                 var route = stages > 0 ? $"{stages} stages" : $"{checkpoints} checkpoints";
-                player.SendChat($"[SurfTimer] {map} — Tier {tier} | {route} | max velocity {maxVelocity} u/s | {summary.RecordCount} records");
+                player.SendChat(ChatFormat.Header($"Map · {map}"));
+                player.SendChat(ChatFormat.Row("DETAILS ·", $"Tier {tier} · {route} · {maxVelocity} max u/s · {summary.RecordCount} records"));
                 if (summary.WorldRecord is { } wr)
-                    player.SendChat($"[SurfTimer] WR — {wr.PlayerName} | {TimerManager.FormatTime(wr.TimeMicroseconds)}");
+                    player.SendChat($"{ChatFormat.HighlightColor}WR{ChatFormat.Reset} · {wr.PlayerName} · {ChatFormat.HighlightColor}{TimerManager.FormatTime(wr.TimeMicroseconds)}{ChatFormat.Reset}");
                 else
-                    player.SendChat("[SurfTimer] No world record has been set yet.");
+                    player.SendChat(ChatFormat.Row("WR ·", "Not set", ChatFormat.MutedColor));
             });
         }
         catch (Exception exception)
@@ -121,7 +125,7 @@ public sealed class PublicCommands(
             {
                 var player = core.PlayerManager.GetPlayer(playerId);
                 if (player is not null && player.SessionId == sessionId)
-                    player.SendChat("[SurfTimer] Map record information is temporarily unavailable.");
+                    player.SendChat(ChatFormat.Error("Map record information is temporarily unavailable."));
             });
         }
     }

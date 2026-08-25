@@ -1,120 +1,92 @@
 # SurfTimer
 
-A Surf timer for Counter-Strike 2 built on [SwiftlyS2](https://github.com/swiftly-solution/swiftlys2).
+SurfTimer is a Counter-Strike 2 Surf timer for [SwiftlyS2](https://github.com/swiftly-solution/swiftlys2). It uses mapper-provided triggers and stores global records in MariaDB/MySQL.
 
-SurfTimer uses the triggers supplied by each map. There is no zone editor or fallback zone system. Records are stored in MariaDB and can be shared by several game servers.
-
-Version `0.1.0` is an early release. It has been developed and tested on Windows.
-
-## What it supports
+## Features
 
 - Linear, staged and bonus routes
 - Ordered checkpoints and stage splits
-- PBs, WRs, Top 10s and completion counts
-- 64 Hz HUD with speed, keys and spectator information
+- PB, WR, Top 10 and completion tracking
+- 64 Hz timer HUD with speed, keys and spectator information
 - Main, stage and bonus replays
-- Practice teleports and noclip
-- Player preferences and profiles
+- Practice locations, teleports and noclip
+- Persistent player settings and profiles
 - Tier 1–7 Points rankings
-- Nominations, RTV and map extension
+- Nominations, RTV, timed votes and map extensions
 - Shared records across multiple servers
-- A read-only leaderboard website and API
-- SharpTimer MariaDB imports through a dry-run tool
-
-See [feature status](docs/FEATURE-STATUS.md) for known gaps and deferred work.
+- Read-only leaderboard website and JSON API
+- Dry-run SharpTimer MariaDB importer
 
 ## Requirements
 
 - Counter-Strike 2 Dedicated Server
 - [SwiftlyS2](https://swiftlys2.net/) 1.4.5 or newer
-- .NET 10
-- MariaDB/MySQL configured through SwiftlyS2
+- .NET 10 runtime
+- MariaDB or MySQL configured in SwiftlyS2
 - [BotController](https://github.com/nicedayzhu/cs2-bot-controller) shared API ABI 18
 
-BotController is currently a dependency of the replay implementation, not the abandoned always-running replay bot. `BotControllerApi.dll` is not included in this repository or the release ZIP.
-
-[CS2FlashingHtmlHudFix](https://github.com/girlglock/CS2FlashingHtmlHudFix) is optional but recommended.
+[CS2FlashingHtmlHudFix](https://github.com/girlglock/CS2FlashingHtmlHudFix) is recommended.
 
 ## Installation
 
-Use a packaged release unless you are developing the plugin. The full process is in [docs/INSTALLATION.md](docs/INSTALLATION.md).
-
-In short:
-
 1. Install SwiftlyS2 and BotController.
-2. Configure a MariaDB connection in SwiftlyS2.
-3. Extract `SurfTimer` to `addons/swiftlys2/plugins/SurfTimer`.
-4. Start the server once so SwiftlyS2 creates the plugin config.
-5. Set a unique `ServerId` and the database connection name in `configs/plugins/surf_timer/config.jsonc`.
+2. Configure a MariaDB/MySQL connection in SwiftlyS2.
+3. Extract the release to `game/csgo/addons/swiftlys2/plugins/SurfTimer`.
+4. Start the server once to create the plugin config.
+5. Set `DatabaseConnection`, `ServerId` and map-voting options in `configs/plugins/surf_timer/config.jsonc`.
 6. Restart the server.
 
-Check the installation from the server console:
+Verify the installation from the server console:
 
 ```text
 surftimer_status
 surftimer_db_health
-surftimer_map_info
+surftimer_catalog_check
 surftimer_map_check
 ```
 
-## Building
-
-Place `BotControllerApi.dll` in `lib/`, then run:
-
-```powershell
-dotnet restore
-dotnet publish -c Release
-```
-
-The published plugin is written to `build/publish/SurfTimer`.
-
-To build the release ZIP and checksum:
-
-```powershell
-.\tools\release\Build-Release.ps1
-```
+See [Installation](docs/INSTALLATION.md) for upgrades and multi-server setup.
 
 ## Configuration
 
-The effective config is stored by SwiftlyS2, outside the plugin directory:
-
-```text
-addons/swiftlys2/configs/plugins/surf_timer/config.jsonc
-```
-
-Each server sharing a database needs a different lowercase `ServerId`. Server-specific map pools and voting ranges stay in that server's config.
+Each server connected to the same database must have a unique `ServerId`. Records and Points are global; map pools and voting settings are per server.
 
 ```jsonc
 {
   "SurfTimer": {
     "Enabled": true,
     "DatabaseConnection": "surftimer",
-    "ServerId": "community-easy-1",
+    "ServerId": "surf-easy-1",
     "HudRefreshRateHz": 64,
     "MapVoting": {
       "Enabled": true,
+      "RockTheVoteEnabled": true,
+      "NominationEnabled": true,
+      "EndOfMapVoteEnabled": true,
+      "ForceVoteAfterMinutes": 15,
+      "VoteDurationSeconds": 60,
+      "ExtendMapMinutes": 10,
       "MinimumTier": 1,
-      "MaximumTier": 2,
-      "ExtendMapMinutes": 10
+      "MaximumTier": 2
     }
   }
 }
 ```
 
-Example multi-server configs are under [deploy/servers](deploy/servers/README.md).
+Example server profiles are available in [deploy/servers](deploy/servers/README.md).
 
 ## Maps
 
-Map definitions live in `resources/configs/maps`. They describe existing mapper triggers; they do not create zones.
+Map definitions are stored in `resources/configs/maps`. They identify existing mapper triggers; SurfTimer does not create zones.
 
-After adding or updating a map, load it and run:
+After adding or updating a definition, load the map and run:
 
 ```text
 surftimer_dump_triggers
 surftimer_map_check
 ```
 
-Use `surftimer_catalog_check` to validate the JSON catalog. See the [bundled map list](resources/configs/maps/README.md).
+Run `surftimer_catalog_check` to validate the complete catalog. The bundled maps are listed in [resources/configs/maps](resources/configs/maps/README.md).
 
 ## Commands
 
@@ -126,17 +98,17 @@ Use `surftimer_catalog_check` to validate the JSON catalog. See the [bundled map
 | Bonuses | `!b <bonus>`, `!rb`, `!bonuspb`, `!bonuswr`, `!bonustop` |
 | Replays | `!replay`, `!stagereplay`, `!breplay`, `!replay stop` |
 | Practice | `!saveloc`, `!tele`, `!teleprev`, `!telenext`, `!noclip`, `!ncspeed` |
-| Preferences | `!settings`, `!hud`, `!speed`, `!status`, `!keys`, `!sounds`, `!replayhud` |
+| Settings | `!settings`, `!hud`, `!speed`, `!status`, `!keys`, `!sounds`, `!replayhud` |
 | Players | `!points`, `!ranks`, `!profile`, `!mapstats` |
 | Maps | `!mapinfo`, `!stages`, `!bonuses`, `!rtv`, `!nominate`, `!1`–`!6` |
 
-Run `!help` in game for the current command summary. Admin commands require `surftimer.admin`; destructive commands also require `confirm` and are audited.
+Use `!help` for the in-game command summary. Admin commands require `surftimer.admin`; destructive commands require `confirm` and are audited.
 
 ## Points
 
-Main completion starts at `25 × 2^(tier-1)` Points. Placement adds a Top 100 bonus, with WR receiving the full amount. Only the best 20 map scores per tier count toward the competitive total. Stages share a smaller mastery pool, and each completed bonus route awards 10 Points.
+Main completion starts at `25 × 2^(tier-1)` Points. Placement adds a Top 100 bonus, with WR receiving the full amount. The best 20 map scores per tier count toward the competitive total. Stages use a smaller mastery pool, and each completed bonus route awards 10 Points.
 
-Groups describe main-map percentile:
+Main-map groups are percentile based:
 
 - G1: top 1%
 - G2: top 1–5%
@@ -144,51 +116,34 @@ Groups describe main-map percentile:
 - G4: top 10–25%
 - G5: top 25–50%
 
-Points are calculated from the current records instead of being stored as a permanent total. Tier changes and leaderboard movement therefore update rankings automatically.
+Points are calculated from current records, so tier changes and leaderboard movement are reflected automatically.
 
-## Development
+## Building
 
-The local Windows scripts assume a test installation at `C:\CS2Server`. They are development helpers, not part of the packaged plugin.
-
-Run the normal regression suite with:
+Place `BotControllerApi.dll` in `lib/`, then run:
 
 ```powershell
-.\tools\Test-All.ps1
+dotnet restore
+dotnet publish -c Release
 ```
 
-Useful options are `-IncludeLiveDatabase`, `-IncludeDownloadedMaps` and `-IncludeReleasePackage`.
-
-The website can be run directly with:
+The published plugin is written to `build/publish/SurfTimer`. Build a release archive with:
 
 ```powershell
-dotnet run --project .\web\SurfTimer.Web.csproj
+.\tools\release\Build-Release.ps1
 ```
-
-Production website database settings use `SURFTIMER_DB_CONNECTION_STRING` or the documented `SURFTIMER_DB_*` environment variables. The local database file is ignored by Git.
 
 ## Database
 
-Migrations run automatically under a MariaDB advisory lock. Multiple servers can start against the same database without racing the schema upgrade.
+Migrations run automatically and are protected by a MariaDB advisory lock. Migrations are forward-only; back up the database before upgrading.
 
-Operational scripts are provided for backup, validation and restore:
+## Additional documentation
 
-```powershell
-.\tools\local-server\Backup-Database.ps1
-.\tools\local-server\Test-DatabaseConsistency.ps1
-.\tools\local-server\Restore-Database.ps1 -BackupPath <file.sql> -ConfirmRestore
-```
-
-Restore requires the matching SHA-256 sidecar. Migrations are forward-only.
-
-## Project notes
-
-- [Installation](docs/INSTALLATION.md)
-- [Feature status](docs/FEATURE-STATUS.md)
-- [Release checklist](docs/RELEASE-CHECKLIST.md)
+- [Installation and upgrades](docs/INSTALLATION.md)
 - [Changelog](CHANGELOG.md)
 - [SharpTimer importer](tools/sharptimer-import/README.md)
 - [Security policy](SECURITY.md)
 
 ## License
 
-No open-source license has been selected. Unless a license is added, the source may be viewed but no redistribution or modification rights are granted.
+No open-source licence is currently granted. See the repository terms before redistributing or modifying the source.

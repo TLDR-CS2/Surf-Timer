@@ -61,6 +61,11 @@ public sealed record PersonalBestDetails(
     int Completions,
     IReadOnlyList<RecordSplit> Splits);
 
+public sealed record MapRunComparison(
+    PersonalBestDetails? PersonalBest,
+    PersonalBestDetails? WorldRecord,
+    IReadOnlyList<long> RankedTimes);
+
 public sealed record DatabaseHealth(
     bool IsHealthy,
     long LatencyMilliseconds,
