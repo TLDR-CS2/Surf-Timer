@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased — 2026-09-07
+## 1.1.0 - 2026-09-07
 
 - Fix native replay stall handling, cursor timing and compatibility interpolation; hide weapons during replay viewing.
 - Preserve Metamod/SwiftlyS2 loader order in local server updates.
@@ -14,7 +14,7 @@
 - Preserve timed-vote deadlines/extensions on hot reload and add quarantine administration.
 - Correct tied ranks, empty route discovery and unranked profiles; isolate website panel failures and cancel stale requests.
 - Stage complete deployment payloads, preflight all targets, keep unique rollback snapshots and test rollback after injected failures.
-- Add portable SDK/runtime selection and regression coverage. Live-server/database validation remains a release requirement.
+- Add portable SDK/runtime selection and regression coverage.
 
 ## 1.0.0 - 2026-08-26
 
