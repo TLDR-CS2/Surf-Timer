@@ -14,3 +14,4 @@ surftimer_db_health
 ```
 
 Check that the server IDs differ and both database checks are healthy.
+`CatalogAuthorityServerId` must name the same designated owner on every instance. The stored database claim survives config changes. See [operations](../../docs/OPERATIONS.md) for ownership and ruleset baselines.

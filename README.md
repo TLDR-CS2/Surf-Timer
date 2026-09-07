@@ -4,16 +4,16 @@ SurfTimer is a Counter-Strike 2 Surf timer for [SwiftlyS2](https://github.com/sw
 
 ## Features
 
-- Linear, staged and bonus routes
+- Linear, staged and bonus routes, plus independent stage attempts
 - Ordered checkpoints and stage splits
 - PB, WR, Top 10 and completion tracking
 - 64 Hz timer HUD with speed, keys and spectator information
-- Main, stage and bonus replays
-- Practice locations, teleports and noclip
+- Main, stage and bonus replays with private playback controls
+- Named practice locations, teleports and noclip
 - Persistent player settings and profiles
 - Tier 1–7 Points rankings
 - Nominations, RTV, timed votes and map extensions
-- Shared records across multiple servers
+- Shared records across multiple servers, durable save retries and reversible moderation
 - Read-only leaderboard website and JSON API
 - Dry-run SharpTimer MariaDB importer
 
@@ -29,7 +29,7 @@ SurfTimer is a Counter-Strike 2 Surf timer for [SwiftlyS2](https://github.com/sw
 
 ## Installation
 
-1. Install SwiftlyS2 and BotController.
+1. Install SwiftlyS2, Metamod and BotController. Check the [native loader setup](docs/REPLAYS.md#native-playback-setup).
 2. Configure a MariaDB/MySQL connection in SwiftlyS2.
 3. Extract the release to `game/csgo/addons/swiftlys2/plugins/SurfTimer`.
 4. Start the server once to create the plugin config.
@@ -57,6 +57,8 @@ Each server connected to the same database must have a unique `ServerId`. Record
     "Enabled": true,
     "DatabaseConnection": "surftimer",
     "ServerId": "surf-easy-1",
+    "CatalogAuthorityServerId": "surf-easy-1",
+    "MaximumReplayMinutes": 30,
     "HudRefreshRateHz": 64,
     "MapVoting": {
       "Enabled": true,
@@ -66,6 +68,7 @@ Each server connected to the same database must have a unique `ServerId`. Record
       "ForceVoteAfterMinutes": 15,
       "VoteDurationSeconds": 60,
       "ExtendMapMinutes": 10,
+      "MaximumMapExtensions": 3,
       "MinimumTier": 1,
       "MaximumTier": 2
     }
@@ -77,7 +80,7 @@ Example server profiles are available in [deploy/servers](deploy/servers/README.
 
 ## Maps
 
-Map definitions are stored in `resources/configs/maps`. They identify existing mapper triggers; SurfTimer does not create zones.
+Map definitions are stored in `resources/configs/maps`. They identify existing mapper triggers; SurfTimer does not create zones. Optional `CancelTriggers` entries invalidate both main and bonus timing when a player crosses a hub/route-transition trigger.
 
 After adding or updating a definition, load the map and run:
 
@@ -94,15 +97,17 @@ Run `surftimer_catalog_check` to validate the complete catalog. The bundled maps
 |---|---|
 | Timer | `!r`, `!restart` |
 | Records | `!pb`, `!wr`, `!top10`, `!rank` |
-| Stages | `!s <stage>`, `!rs`, `!stagepb`, `!stagewr`, `!stagetop` |
+| Stages | `!s <stage>`, `!rs`, `!stageattempt <stage>`, `!stagepb`, `!stagewr`, `!stagetop` |
 | Bonuses | `!b <bonus>`, `!rb`, `!bonuspb`, `!bonuswr`, `!bonustop` |
-| Replays | `!replay`, `!stagereplay`, `!breplay`, `!replay stop` |
-| Practice | `!saveloc`, `!tele`, `!teleprev`, `!telenext`, `!noclip`, `!ncspeed` |
+| Replays | `!replay`, `!stagereplay`, `!breplay`, `!replay stop`, `!replay pause/resume`, `!replay seek <seconds>`, `!replay speed <0.25-4>` |
+| Practice | `!saveloc [name]`, `!tele [name|number]`, `!locs`, `!delloc`, `!clearlocs`, `!teleprev`, `!telenext`, `!noclip`, `!ncspeed` |
 | Settings | `!settings`, `!hud`, `!speed`, `!status`, `!keys`, `!sounds`, `!replayhud` |
 | Players | `!points`, `!ranks`, `!profile`, `!mapstats` |
-| Maps | `!mapinfo`, `!stages`, `!bonuses`, `!rtv`, `!nominate`, `!1`–`!6` |
+| Maps | `!mapinfo`, `!stages`, `!bonuses`, `!rtv`, `!nominate`, `!nextmap`, `!1`–`!6` |
 
-Use `!help` for the in-game command summary. Admin commands require `surftimer.admin`; destructive commands require `confirm` and are audited.
+Checkpoint and stage touches show transient PB/WR deltas on the HUD. `SplitComparisons.Reference` selects `PB`, `WR`, `Both`, or `Off`. Map voting ignores players idle beyond `AfkAfterSeconds`, balances random candidates across tiers, and automatically quarantines maps after repeated runtime compatibility failures.
+
+Use `!help` for the in-game command summary. Admin commands require `surftimer.admin`; moderation is audited. Use `!stinvalidate` with a reason and `!strestore` with the returned archive ID. `!stquarantine` lists compatibility failures and supports `retest` and `reinstate <map>`.
 
 ## Points
 
@@ -133,6 +138,8 @@ The published plugin is written to `build/publish/SurfTimer`. Build a release ar
 .\tools\release\Build-Release.ps1
 ```
 
+For local regression checks, install Node.js and run `tools/Test-All.ps1`. `-DotNetPath` and `-NodePath` accept explicit executables; `-PackagesPath` selects an existing NuGet cache when needed. The .NET resolver checks PATH and then the optional local research SDK; `global.json` selects .NET 10 stable feature bands. The default checks do not write to a live database or install a server.
+
 ## Database
 
 Migrations run automatically and are protected by a MariaDB advisory lock. Migrations are forward-only; back up the database before upgrading.
@@ -140,6 +147,9 @@ Migrations run automatically and are protected by a MariaDB advisory lock. Migra
 ## Additional documentation
 
 - [Installation and upgrades](docs/INSTALLATION.md)
+- [Server operations](docs/OPERATIONS.md)
+- [Replay setup and troubleshooting](docs/REPLAYS.md)
+- [In-game validation](docs/IN-GAME-VALIDATION.md)
 - [Changelog](CHANGELOG.md)
 - [SharpTimer importer](tools/sharptimer-import/README.md)
 - [Security policy](SECURITY.md)
