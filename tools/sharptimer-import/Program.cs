@@ -160,6 +160,21 @@ internal static class SharpTimerImporter
 
             foreach (var row in rows)
             {
+                // The importer has no matching replay, checkpoint splits, or validation for the incoming PB.
+                // Lock the existing record before deleting dependencies so concurrent server saves serialize.
+                await using (var existing = target.CreateCommand())
+                {
+                    existing.Transaction = transaction;
+                    existing.CommandText = "SELECT r.id,r.best_time_us FROM st_records r JOIN st_maps m ON m.id=r.map_id WHERE m.name=@map AND r.player_steam_id=@steam AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf' FOR UPDATE";
+                    existing.Parameters.AddWithValue("@map", row.Map);
+                    existing.Parameters.AddWithValue("@steam", row.SteamId);
+                    long? replacedId = null;
+                    await using (var reader = await existing.ExecuteReaderAsync())
+                        if (await reader.ReadAsync() && row.TimeMicroseconds < reader.GetInt64(1)) replacedId = reader.GetInt64(0);
+                    if (replacedId is { } id)
+                        foreach (var table in new[] { "st_replays", "st_record_splits", "st_run_validation" })
+                            await ExecuteAsync(target, transaction, $"DELETE FROM {table} WHERE record_id=@id", ("@id", id));
+                }
                 var pbAt = UnixOrFallback(row.PbUnix, DateTime.UtcNow);
                 var lastAt = UnixOrFallback(row.LastFinished, pbAt);
                 await ExecuteAsync(target, transaction, """
@@ -278,3 +293,4 @@ internal static class SharpTimerImporter
         private static bool IsIdentifier(string value) => value.Length is > 0 and <= 64 && value.All(character => char.IsLetterOrDigit(character) || character == '_');
     }
 }
+

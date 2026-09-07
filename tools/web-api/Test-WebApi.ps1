@@ -67,6 +67,36 @@ Assert-Api ((Invoke-TestRequest '/api/players/999').Status -eq 404) 'missing pla
 $websiteStatus = (Invoke-WebRequest -UseBasicParsing -Uri ($BaseUrl.TrimEnd('/') + "/maps/$map")).StatusCode
 Assert-Api ($websiteStatus -eq 200) 'shareable website fallback'
 
+# These checks are read-only, including the deliberately out-of-range pages.
+$farPage = Invoke-TestRequest "/api/maps/$map/leaderboard?page=2147483647&pageSize=100"
+Assert-Api ($farPage.Status -eq 200 -and $farPage.Body.records.Count -eq 0 -and $farPage.Body.pagination.total -eq $leaderboard.Body.pagination.total) 'large page preserves leaderboard total without overflow'
+$routes = Invoke-TestRequest "/api/maps/$map/routes"
+Assert-Api ($routes.Status -eq 200 -and @($routes.Body.routes | Where-Object route -eq 'stage').Count -eq $maps.Body[0].stageCount) 'configured stage routes exist before completions'
+$rankPage = Invoke-TestRequest '/api/rankings?page=2147483647&pageSize=100'
+Assert-Api ($rankPage.Status -eq 200 -and $rankPage.Body.rankings.Count -eq 0 -and $rankPage.Body.pagination.total -eq $rankings.Body.pagination.total) 'large rankings page preserves total'
+$times = Invoke-TestRequest "/api/maps/$map/leaderboard?pageSize=100"
+$previous = $null
+foreach ($record in $times.Body.records) {
+    if ($null -ne $previous -and $record.timeUs -eq $previous.timeUs) { Assert-Api ($record.rank -eq $previous.rank) 'equal times share competition rank' }
+    $previous = $record
+}
+
+if ($leaderboard.Body.records.Count -gt 0) {
+    foreach ($path in @("/api/players/$steamId/records", "/api/players/$steamId/history")) {
+        $first = Invoke-TestRequest ($path + '?page=1&pageSize=1')
+        $far = Invoke-TestRequest ($path + '?page=2147483647&pageSize=100')
+        Assert-Api ($far.Status -eq 200 -and $far.Body.pagination.total -eq $first.Body.pagination.total) "empty-page total for $path"
+    }
+    $rawTimes = (Invoke-WebRequest -UseBasicParsing -Uri ($BaseUrl.TrimEnd('/') + "/api/maps/$map/leaderboard")).Content
+    Assert-Api ($rawTimes -match '"achievedAt":"[^"]+Z"') 'record timestamps explicitly UTC'
+}
+$stageRoute = $routes.Body.routes | Where-Object route -eq 'stage' | Select-Object -First 1
+if ($null -ne $stageRoute) {
+    $first = Invoke-TestRequest "/api/maps/$map/stages/$($stageRoute.index)?page=1&pageSize=1"
+    $far = Invoke-TestRequest "/api/maps/$map/stages/$($stageRoute.index)?page=2147483647&pageSize=100"
+    Assert-Api ($far.Status -eq 200 -and $far.Body.pagination.total -eq $first.Body.pagination.total) 'empty stage page preserves total'
+}
+
 if ($IncludeRateLimit) {
     $limited = $false
     foreach ($request in 1..10050) {
@@ -77,3 +107,4 @@ if ($IncludeRateLimit) {
 }
 
 Write-Host "API TESTS PASSED: $script:passed"
+

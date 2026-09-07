@@ -23,14 +23,18 @@ public sealed class HudManager(
 {
     private const int MessageDurationMilliseconds = 40;
     private CancellationTokenSource? _timer;
-    private readonly Dictionary<(ulong SteamId,string Map), CachedPb> _pbCache=[];
-    private readonly HashSet<(ulong SteamId,string Map)> _pbRequests=[];
-    private readonly Dictionary<string,CachedStandings> _standingsCache=new(StringComparer.OrdinalIgnoreCase);
-    private readonly HashSet<string> _standingsRequests=new(StringComparer.OrdinalIgnoreCase);
+    private readonly RefreshCache<(ulong SteamId,string Map,int Stage,int Bonus), CachedPb> _pbCache = new();
+    private readonly RefreshCache<string, CachedStandings> _standingsCache = new();
+    private void OnRecordsChanged(ulong steamId, string map) => core.Scheduler.NextTick(() =>
+    {
+        _pbCache.Invalidate(key => string.Equals(key.Map, map, StringComparison.OrdinalIgnoreCase));
+        _standingsCache.Invalidate(key => string.Equals(key, map, StringComparison.OrdinalIgnoreCase));
+    });
 
     public void Start()
     {
         if (_timer is not null) return;
+        records.RecordsChanged += OnRecordsChanged;
         var refreshRate = Math.Clamp(options.HudRefreshRateHz, 1, 128);
         _timer = core.Scheduler.RepeatBySeconds(1f / refreshRate, Update);
         logger.LogInformation("HUD manager started at {RefreshRateHz} Hz.", refreshRate);
@@ -38,6 +42,9 @@ public sealed class HudManager(
 
     public void Stop()
     {
+        records.RecordsChanged -= OnRecordsChanged;
+        _pbCache.Invalidate(_ => true);
+        _standingsCache.Invalidate(_ => true);
         _timer?.Cancel();
         _timer?.Dispose();
         _timer = null;
@@ -66,10 +73,11 @@ public sealed class HudManager(
             var session = players.Get(player.PlayerID);
             if (session is null) continue;
 
-            var elapsed = session.ActiveBonus > 0
+            var elapsed = session.ActiveStageAttempt > 0 ? session.StageRun.ElapsedAt(now) : session.ActiveBonus > 0
                 ? session.BonusRun.ElapsedAt(now)
                 : session.Run.ElapsedAt(now);
             var speed = GetHorizontalSpeed(player.PlayerPawn);
+            if ((ulong)player.PressedButtons != 0 || speed > 10) session.MarkActivity();
             var maxVelocity = maps.Current?.Configuration.MaxVelocity ?? 3500;
             if (playback.TryGetViewerStatus(session.SessionId, out var replay))
             {
@@ -83,7 +91,7 @@ public sealed class HudManager(
             if (observed.TryGetValue(player.PlayerID,out var watched))
             {
                 var target=watched.Player; var targetSession=watched.Session;
-                var targetElapsed=targetSession.ActiveBonus>0?targetSession.BonusRun.ElapsedAt(now):targetSession.Run.ElapsedAt(now);
+                var targetElapsed=targetSession.ActiveStageAttempt>0?targetSession.StageRun.ElapsedAt(now):targetSession.ActiveBonus>0?targetSession.BonusRun.ElapsedAt(now):targetSession.Run.ElapsedAt(now);
                 var targetSpeed=GetHorizontalSpeed(target.PlayerPawn);
                 player.SendCenterHTML(BuildSpectatorHtml(targetSession,session.Preferences,target.Name,targetElapsed,targetSpeed,maxVelocity,
                     checkpointCount,stageCount,(ulong)target.PressedButtons,spectatorCounts.GetValueOrDefault(target.PlayerID)),MessageDurationMilliseconds);
@@ -131,21 +139,28 @@ public sealed class HudManager(
         html.Append("<font color='#58d6ff'><b>")
             .Append(TimerManager.FormatTime(elapsedMicroseconds))
             .Append("</b></font>");
-        if (session.Run.State == RunState.Running && session.ActiveBonus == 0)
+        if (session.Run.State == RunState.Running && session.ActiveBonus == 0 && session.ActiveStageAttempt == 0)
             html.Append(" <font color='").Append(GetRankColor(comparison.ProjectedRank)).Append("'><b>[#")
                 .Append(comparison.ProjectedRank).Append("]</b></font>");
 
         if (preferences.StatusEnabled)
         {
-            var activeRun = session.ActiveBonus > 0 ? session.BonusRun : session.Run;
+            var activeRun = session.ActiveStageAttempt > 0 ? session.StageRun : session.ActiveBonus > 0 ? session.BonusRun : session.Run;
             var (stateText, stateColor) = session.Practice.IsActive
                 ? (session.Practice.IsNoclip ? "Practice | Noclip" : "Practice", "#ffd166")
                 : GetRunStateDisplay(activeRun.State);
             html.Append(" <font color='#68737c'>· </font><font color='#aab2b8'>");
-            if (session.ActiveBonus > 0)
+            if (session.ActiveStageAttempt > 0)
+                html.Append("STAGE ATTEMPT ").Append(session.ActiveStageAttempt).Append(" · ");
+            else if (session.ActiveBonus > 0)
                 html.Append("BONUS ").Append(session.ActiveBonus).Append(" · ");
             else if (stageCount > 0)
-                html.Append("STAGE ").Append(Math.Max(1, session.Run.CurrentStage)).Append('/').Append(stageCount).Append(" · ");
+            {
+                var displayStage = session.Practice.IsActive && session.Practice.CurrentStage > 0
+                    ? session.Practice.CurrentStage
+                    : session.DisplayStage;
+                html.Append("STAGE ").Append(Math.Clamp(displayStage, 1, stageCount)).Append('/').Append(stageCount).Append(" · ");
+            }
             html.Append("</font><font color='").Append(stateColor).Append("'><b>")
                 .Append(stateText.ToUpperInvariant()).Append("</b></font>");
         }
@@ -159,6 +174,9 @@ public sealed class HudManager(
             .Append(maps.Current?.Configuration.Tier ?? 1)
             .Append("&#160;·&#160;").Append(stageCount > 0 ? "STAGED" : "LINEAR")
             .Append("</font></nobr>");
+
+        if (session.SplitComparisonHtml is { } split && session.SplitComparisonUntil > DateTimeOffset.UtcNow)
+            html.Append("<br>").Append(split);
 
         if (preferences.KeysEnabled)
             html.Append("<br>").Append(BuildKeysHtml(pressedButtons));
@@ -183,8 +201,13 @@ public sealed class HudManager(
     {
         var map=maps.Current?.Name;
         if(string.IsNullOrWhiteSpace(map)) return new(null,1,0);
+        if(target.ActiveStageAttempt>0 || target.ActiveBonus>0)
+        {
+            var routePb=GetCachedPb(target);
+            return new(routePb,1,routePb?.Total??0);
+        }
         RequestStandings(map);
-        var times=_standingsCache.TryGetValue(map,out var standings)?standings.Times:[];
+        var times=_standingsCache.Get(map)?.Times ?? [];
         var projected=target.Run.State==RunState.Running?1+CountFaster(times,elapsed):1;
         return new(GetCachedPb(target),projected,times.Count);
     }
@@ -193,52 +216,59 @@ public sealed class HudManager(
     {
         var map=maps.Current?.Name;
         if(!target.IsAuthorized || string.IsNullOrWhiteSpace(map)) return null;
-        var key=(target.SteamId,map);
-        if(_pbCache.TryGetValue(key,out var cached) && DateTimeOffset.UtcNow-cached.LoadedAt<TimeSpan.FromSeconds(30)) return cached;
-        if(_pbRequests.Add(key)) _=LoadPbAsync(key);
-        return cached;
+        var key=(target.SteamId,map,target.ActiveStageAttempt,target.ActiveBonus);
+        if(_pbCache.TryBegin(key, DateTimeOffset.UtcNow, out var generation)) _=LoadPbAsync(key, generation);
+        return _pbCache.Get(key);
     }
 
-    private async Task LoadPbAsync((ulong SteamId,string Map) key)
+    private async Task LoadPbAsync((ulong SteamId,string Map,int Stage,int Bonus) key, long generation)
     {
         try
         {
-            var pb=await records.GetPersonalBestDetailsAsync(key.SteamId,key.Map).ConfigureAwait(false);
+            CachedPb? result;
+            if(key.Stage>0 || key.Bonus>0)
+            {
+                var routePb=key.Stage>0
+                    ? await records.GetStagePersonalBestAsync(key.SteamId,key.Map,key.Stage).ConfigureAwait(false)
+                    : await records.GetBonusPersonalBestAsync(key.SteamId,key.Map,key.Bonus).ConfigureAwait(false);
+                result=routePb is null?null:new(routePb.TimeMicroseconds,routePb.Rank,routePb.TotalRecords,DateTimeOffset.UtcNow);
+            }
+            else
+            {
+                var pb=await records.GetPersonalBestDetailsAsync(key.SteamId,key.Map).ConfigureAwait(false);
+                result=pb is null?null:new(pb.TimeMicroseconds,pb.Rank,pb.TotalRecords,DateTimeOffset.UtcNow);
+            }
             core.Scheduler.NextTick(()=>
             {
-                if(pb is not null) _pbCache[key]=new(pb.TimeMicroseconds,pb.Rank,pb.TotalRecords,DateTimeOffset.UtcNow);
-                else _pbCache.Remove(key);
-                _pbRequests.Remove(key);
+                _pbCache.Complete(key, generation, result, DateTimeOffset.UtcNow.AddSeconds(30));
             });
         }
         catch(Exception exception)
         {
             logger.LogWarning(exception,"Could not refresh spectator PB for {SteamId} on {Map}.",key.SteamId,key.Map);
-            core.Scheduler.NextTick(()=>_pbRequests.Remove(key));
+            core.Scheduler.NextTick(()=>_pbCache.Complete(key, generation, _pbCache.Get(key), DateTimeOffset.UtcNow.AddSeconds(15)));
         }
     }
 
     private void RequestStandings(string map)
     {
-        if(_standingsCache.TryGetValue(map,out var cached) && DateTimeOffset.UtcNow-cached.LoadedAt<TimeSpan.FromSeconds(15)) return;
-        if(_standingsRequests.Add(map)) _=LoadStandingsAsync(map);
+        if(_standingsCache.TryBegin(map, DateTimeOffset.UtcNow, out var generation)) _=LoadStandingsAsync(map, generation);
     }
 
-    private async Task LoadStandingsAsync(string map)
+    private async Task LoadStandingsAsync(string map, long generation)
     {
         try
         {
             var times=await records.GetRankedTimesAsync(map).ConfigureAwait(false);
             core.Scheduler.NextTick(()=>
             {
-                _standingsCache[map]=new(times,DateTimeOffset.UtcNow);
-                _standingsRequests.Remove(map);
+                _standingsCache.Complete(map, generation, new(times,DateTimeOffset.UtcNow), DateTimeOffset.UtcNow.AddSeconds(15));
             });
         }
         catch(Exception exception)
         {
             logger.LogWarning(exception,"Could not refresh live standings for {Map}.",map);
-            core.Scheduler.NextTick(()=>_standingsRequests.Remove(map));
+            core.Scheduler.NextTick(()=>_standingsCache.Complete(map, generation, _standingsCache.Get(map), DateTimeOffset.UtcNow.AddSeconds(15)));
         }
     }
 

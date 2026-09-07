@@ -34,6 +34,7 @@
     <Compile Remove="tools\sharptimer-import\**\*.cs" />
     <Compile Remove="tools\replay-tests\**\*.cs" />
     <Compile Remove="tools\database-load-tests\**\*.cs" />
+    <Compile Remove="tools\storage-tests\**\*.cs" />
     <Compile Remove="tools\soak-tests\**\*.cs" />
     <Compile Remove="tools\catalog-tests\**\*.cs" />
     <Compile Remove="web\**\*.cs" />

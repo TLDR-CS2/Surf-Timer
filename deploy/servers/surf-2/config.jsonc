@@ -10,6 +10,7 @@
       "EndOfMapVoteEnabled": true,
       "ForceVoteAfterMinutes": 15,
       "ExtendMapMinutes": 10,
+      "MaximumMapExtensions": 3,
       "MinimumTier": 1,
       "MaximumTier": 2
     }

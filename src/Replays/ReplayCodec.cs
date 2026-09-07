@@ -85,11 +85,13 @@ public static class ReplayCodec
                 reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(), reader.ReadSingle(),
                 reader.ReadSingle(), reader.ReadUInt64());
             ValidateFrame(frame);
+            if (frames.Count > 0 && frame.TimeMicroseconds < frames[^1].TimeMicroseconds)
+                throw new InvalidDataException("Replay frame timestamps are not ordered.");
             frames.Add(frame);
         }
         if (frames[^1].TimeMicroseconds > replay.DurationMicroseconds + 1_000_000)
             throw new InvalidDataException("Replay frame timestamps exceed the stored duration.");
-        return new ReplayCapture(rate, frames);
+        return new ReplayCapture(rate, frames, RecordedDurationMicroseconds: replay.DurationMicroseconds);
     }
 
     private static ReplayCapture DecodeNative(EncodedReplay replay)

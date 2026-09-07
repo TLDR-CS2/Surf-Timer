@@ -20,12 +20,14 @@ $expected = ((Get-Content -LiteralPath $hashPath -First 1) -split '\s+')[0].ToLo
 $actual = (Get-FileHash -Algorithm SHA256 -LiteralPath $PackagePath).Hash.ToLowerInvariant()
 if ($actual -ne $expected) { throw "Release SHA-256 verification failed." }
 
-$serverExe = "C:\CS2Server\server\game\bin\win64\cs2.exe"
-$running = Get-Process cs2 -ErrorAction SilentlyContinue | Where-Object Path -eq $serverExe
+$serverExecutables = @($SwiftlyRoots | ForEach-Object {
+    [IO.Path]::GetFullPath((Join-Path $_ '..\..\..\bin\win64\cs2.exe'))
+})
+$running = Get-Process cs2 -ErrorAction SilentlyContinue | Where-Object { $_.Path -in $serverExecutables }
 if ($running) { throw "Stop all local CS2 server instances before upgrading. Running PID(s): $($running.Id -join ', ')." }
 
 $temporary = Join-Path ([System.IO.Path]::GetTempPath()) ("surftimer-release-" + [guid]::NewGuid().ToString("N"))
-$rollbackRoot = Join-Path $workspace ("backups\deployments\" + (Get-Date -Format "yyyyMMdd-HHmmss"))
+$rollbackRoot = Join-Path $workspace ("backups\deployments\" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N"))
 try {
     Expand-Archive -LiteralPath $PackagePath -DestinationPath $temporary
     $manifestPath = Join-Path $temporary "release-manifest.json"
@@ -45,25 +47,17 @@ try {
     if ([int]$manifest.databaseSchemaVersion -ne $packagedSchemaVersion) {
         throw "Release manifest schema version does not match packaged migrations."
     }
-    New-Item -ItemType Directory -Force -Path $rollbackRoot | Out-Null
-    foreach ($swiftlyRootValue in $SwiftlyRoots) {
-        $swiftlyRoot = [System.IO.Path]::GetFullPath($swiftlyRootValue)
-        if (-not (Test-Path -LiteralPath $swiftlyRoot)) { throw "Swiftly root does not exist: $swiftlyRoot" }
-        $pluginDirectory = Join-Path $swiftlyRoot "plugins\SurfTimer"
-        $instanceName = Split-Path -Leaf $swiftlyRoot
-        $snapshot = Join-Path $rollbackRoot $instanceName
-        if (Test-Path -LiteralPath $pluginDirectory) {
-            New-Item -ItemType Directory -Force -Path $snapshot | Out-Null
-            Copy-Item -Path (Join-Path $pluginDirectory "*") -Destination $snapshot -Recurse -Force
-        }
-        New-Item -ItemType Directory -Force -Path $pluginDirectory | Out-Null
-        Copy-Item -Path (Join-Path $payload "*") -Destination $pluginDirectory -Recurse -Force
-        Write-Host "Installed SurfTimer $($manifest.version) to $pluginDirectory"
-    }
+    . (Join-Path $PSScriptRoot 'PluginPayloadSwap.ps1')
+    $targets = @($SwiftlyRoots | ForEach-Object { [pscustomobject]@{ Root = $_; Source = $payload } })
+    Invoke-PluginPayloadSwap -Targets $targets -SnapshotRoot $rollbackRoot
     Copy-Item -LiteralPath $manifestPath -Destination (Join-Path $rollbackRoot "installed-release-manifest.json")
     Write-Host "Rollback snapshot: $rollbackRoot"
     Write-Host "Effective SwiftlyS2 configs and data directories are outside the plugin payload and were not modified."
 }
 finally {
+    $tempParent = [IO.Path]::GetFullPath([IO.Path]::GetTempPath()).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ([IO.Path]::GetDirectoryName([IO.Path]::GetFullPath($temporary)) -ne $tempParent) { throw "Invalid temporary cleanup path." }
     if (Test-Path -LiteralPath $temporary) { Remove-Item -LiteralPath $temporary -Recurse -Force }
 }
+
+

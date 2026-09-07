@@ -33,11 +33,16 @@ if ([string]::IsNullOrWhiteSpace($WorkshopId) -and $workshopMaps.ContainsKey($Ma
     $WorkshopId = $workshopMaps[$Map]
 }
 
+$sourceMapConfig = Join-Path (Join-Path $PSScriptRoot "maps") ($Map + ".cfg")
+if ([string]::IsNullOrWhiteSpace($WorkshopId) -and (Test-Path -LiteralPath $sourceMapConfig)) {
+    $firstLine = Get-Content -LiteralPath $sourceMapConfig -TotalCount 1
+    if ($firstLine -match 'Workshop\s+(\d+)') { $WorkshopId = $Matches[1] }
+}
+
 if (-not (Test-Path -LiteralPath $serverExe)) {
     throw "CS2 server executable was not found at $serverExe. Run Update-Server.ps1 first."
 }
 
-$sourceMapConfig = Join-Path (Join-Path $PSScriptRoot "maps") ($Map + ".cfg")
 $serverConfigRoot = Join-Path $serverRoot "game\csgo\cfg\surftimer"
 $serverMapConfigRoot = Join-Path $serverConfigRoot "maps"
 New-Item -ItemType Directory -Force -Path $serverMapConfigRoot | Out-Null

@@ -6,7 +6,13 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/Hud/RefreshCache.cs" Link="RefreshCache.cs" />
     <Compile Include="../../src/Timing/PlayerRun.cs" Link="PlayerRun.cs" />
     <Compile Include="../../src/Storage/SurfPointsPolicy.cs" Link="SurfPointsPolicy.cs" />
+    <Compile Include="../../src/Players/SurfPlayerSession.cs" Link="SurfPlayerSession.cs" />
+    <Compile Include="../../src/Players/PlayerPreferences.cs" Link="PlayerPreferences.cs" />
+    <Compile Include="../../src/Practice/PracticeModels.cs" Link="PracticeModels.cs" />
+    <PackageReference Include="SwiftlyS2.CS2" Version="1.4.5" />
   </ItemGroup>
 </Project>
+

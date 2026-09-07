@@ -7,7 +7,7 @@ using SurfTimer.Timing;
 
 namespace SurfTimer.Storage;
 
-public sealed class RecordRepository(
+public sealed partial class RecordRepository(
     ISwiftlyCore core,
     SurfTimerOptions options,
     MigrationRunner migrations,
@@ -16,6 +16,7 @@ public sealed class RecordRepository(
     private readonly CancellationTokenSource _shutdown = new();
     private readonly object _initializationSync = new();
     private Task? _initialization;
+    private Task? _pendingRecovery;
     private const string OverallRankingCte = """
         WITH map_rankings AS (
           SELECT r.player_steam_id,r.map_id,m.tier,
@@ -96,8 +97,10 @@ public sealed class RecordRepository(
     {
         lock (_initializationSync)
         {
+            if (_initialization is { IsFaulted: true } || _initialization is { IsCanceled: true }) _initialization = null;
             if (_initialization is not null) return;
             Status = "migrating";
+            _pendingRecovery ??= Task.Run(RecoverPendingRunsAsync);
             _initialization = Task.Run(async () =>
             {
                 try
@@ -171,6 +174,7 @@ public sealed class RecordRepository(
         {
             await ReadyAsync().ConfigureAwait(false);
             await using var connection = await OpenAsync().ConfigureAwait(false);
+            if (!await IsCatalogAuthorityAsync(connection).ConfigureAwait(false)) return;
             await UpsertMapAsync(connection, null, name, workshopId, checkpointCount, _shutdown.Token).ConfigureAwait(false);
             await using var command = connection.CreateCommand();
             command.CommandText = "UPDATE st_maps SET tier=@tier,enabled=@enabled,checkpoint_count=@checkpoints,stage_count=@stages,bonus_count=@bonuses,updated_at=UTC_TIMESTAMP(6) WHERE name=@name";
@@ -188,7 +192,7 @@ public sealed class RecordRepository(
         }
     }
 
-    public async Task<SaveRecordResult> SaveRunAsync(CompletedRun run)
+    private async Task<SaveRecordResult> SaveRunDirectAsync(CompletedRun run)
     {
         await ReadyAsync().ConfigureAwait(false);
         Exception? lastFailure = null;
@@ -210,6 +214,7 @@ public sealed class RecordRepository(
                     run.SteamId, run.MapName, attempt + 1, delay.TotalMilliseconds);
                 await Task.Delay(delay, _shutdown.Token).ConfigureAwait(false);
             }
+            catch (RulesetAwaitingApprovalException) { throw; }
             catch
             {
                 MarkFailure();
@@ -219,22 +224,25 @@ public sealed class RecordRepository(
         throw lastFailure ?? new InvalidOperationException("Global PB write failed without an exception.");
     }
 
-    public async Task<SaveRecordResult> SaveBonusAsync(CompletedBonusRun run)
+    private async Task<SaveRecordResult> SaveBonusAttemptAsync(CompletedBonusRun run)
     {
         await ReadyAsync().ConfigureAwait(false);
         await using var connection = await OpenAsync().ConfigureAwait(false);
         await using var transaction = await connection.BeginTransactionAsync(_shutdown.Token).ConfigureAwait(false);
         try
         {
+            var saved = await ReadReceiptAsync(connection, transaction, run.RunId).ConfigureAwait(false);
+            if (saved is not null) return saved;
+            await RequireRulesetAsync(connection, transaction, run.MapName, run.RulesetFingerprint).ConfigureAwait(false);
             await using (var player = connection.CreateCommand())
             {
                 player.Transaction = transaction;
                 player.CommandText = """
                     INSERT INTO st_players (steam_id,last_name,first_seen_at,last_seen_at,first_server_id,last_server_id,total_connections)
-                    VALUES (@steam,@name,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),@server,@server,1)
-                    ON DUPLICATE KEY UPDATE last_name=VALUES(last_name),last_seen_at=UTC_TIMESTAMP(6),last_server_id=VALUES(last_server_id)
+                    VALUES (@steam,@name,@seen,@seen,@server,@server,1)
+                    ON DUPLICATE KEY UPDATE last_name=IF(@seen>=last_seen_at,VALUES(last_name),last_name),last_server_id=IF(@seen>=last_seen_at,VALUES(last_server_id),last_server_id),first_seen_at=LEAST(first_seen_at,@seen),last_seen_at=GREATEST(last_seen_at,@seen)
                     """;
-                player.AddParameter("@steam", run.SteamId); player.AddParameter("@name", run.PlayerName);
+                player.AddParameter("@seen", run.FinishedAtUtc.UtcDateTime); player.AddParameter("@steam", run.SteamId); player.AddParameter("@name", run.PlayerName);
                 player.AddParameter("@server", run.ServerId);
                 await player.ExecuteNonQueryAsync(_shutdown.Token).ConfigureAwait(false);
             }
@@ -256,21 +264,24 @@ public sealed class RecordRepository(
                 await using var insert = connection.CreateCommand(); insert.Transaction = transaction;
                 insert.CommandText = """
                     INSERT INTO st_records (map_id,player_steam_id,route_type,route_index,style,mode,best_time_us,completions,first_completed_at,last_completed_at,pb_updated_at,last_server_id)
-                    VALUES (@map,@steam,'bonus',@bonus,0,'surf',@time,1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),@server);
+                    VALUES (@map,@steam,'bonus',@bonus,0,'surf',@time,1,@finished,@finished,@finished,@server);
                     SELECT LAST_INSERT_ID()
                     """;
                 insert.AddParameter("@map", mapId); insert.AddParameter("@steam", run.SteamId); insert.AddParameter("@bonus", run.Bonus);
-                insert.AddParameter("@time", run.TimeMicroseconds); insert.AddParameter("@server", run.ServerId);
+                insert.AddParameter("@time", run.TimeMicroseconds); insert.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime); insert.AddParameter("@server", run.ServerId);
                 id = Convert.ToInt64(await insert.ExecuteScalarAsync(_shutdown.Token).ConfigureAwait(false));
             }
             else
             {
                 await using var update = connection.CreateCommand(); update.Transaction = transaction;
-                update.CommandText = "UPDATE st_records SET completions=completions+1,last_completed_at=UTC_TIMESTAMP(6),last_server_id=@server,best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,UTC_TIMESTAMP(6),pb_updated_at) WHERE id=@id";
+                update.CommandText = "UPDATE st_records SET completions=completions+1,last_server_id=IF(@finished>=last_completed_at,@server,last_server_id),first_completed_at=LEAST(first_completed_at,@finished),last_completed_at=GREATEST(last_completed_at,@finished),best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,@finished,pb_updated_at) WHERE id=@id";
+                update.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime);
                 update.AddParameter("@server", run.ServerId); update.AddParameter("@pb", isPb ? 1 : 0);
                 update.AddParameter("@time", run.TimeMicroseconds); update.AddParameter("@id", id.Value);
                 await update.ExecuteNonQueryAsync(_shutdown.Token).ConfigureAwait(false);
             }
+            if (isPb && run.Replay is null)
+                await DeleteReplayAsync(connection, transaction, id.Value, false, _shutdown.Token).ConfigureAwait(false);
             if (isPb && run.Replay is not null)
                 await ReplaceReplayAsync(connection, transaction, id.Value, ReplayCodec.Encode(run.Replay), _shutdown.Token).ConfigureAwait(false);
             if (isPb)
@@ -278,17 +289,19 @@ public sealed class RecordRepository(
             await TrackCompletedRunAsync(connection, transaction, run.SteamId, run.TimeMicroseconds, _shutdown.Token).ConfigureAwait(false);
             if (isPb)
                 await AppendPbHistoryAsync(connection, transaction, id.Value, mapId, run.SteamId, "bonus", run.Bonus,
-                    previous, run.TimeMicroseconds, _shutdown.Token).ConfigureAwait(false);
-            await transaction.CommitAsync(_shutdown.Token).ConfigureAwait(false);
+                    previous, run.TimeMicroseconds, run.FinishedAtUtc.UtcDateTime, _shutdown.Token).ConfigureAwait(false);
             var best = isPb ? run.TimeMicroseconds : previous!.Value;
-            await using var rank = connection.CreateCommand();
+            await using var rank = connection.CreateCommand(); rank.Transaction = transaction;
             rank.CommandText = "SELECT 1+COUNT(*) FROM st_records WHERE map_id=@map AND route_type='bonus' AND route_index=@bonus AND style=0 AND mode='surf' AND best_time_us<@best";
             rank.AddParameter("@map", mapId); rank.AddParameter("@bonus", run.Bonus); rank.AddParameter("@best", best);
             MarkSuccess();
-            return new SaveRecordResult(isPb, previous, best,
+            var result = new SaveRecordResult(isPb, previous, best,
                 Convert.ToInt32(await rank.ExecuteScalarAsync(_shutdown.Token).ConfigureAwait(false)), []);
+            await SaveReceiptAsync(connection, transaction, run.RunId, result, run.RulesetFingerprint, run.SteamId, run.MapName, "bonus", run.Bonus).ConfigureAwait(false);
+            await transaction.CommitAsync(_shutdown.Token).ConfigureAwait(false);
+            return result;
         }
-        catch { await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false); MarkFailure(); throw; }
+        catch (Exception exception) { try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ } if (exception is not RulesetAwaitingApprovalException) MarkFailure(); throw; }
     }
 
     public async Task<StagePersonalBest?> GetBonusPersonalBestAsync(ulong steamId, string mapName, int bonus)
@@ -325,7 +338,7 @@ public sealed class RecordRepository(
         var entries = new List<LeaderboardEntry>();
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
         while (await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
-            entries.Add(new LeaderboardEntry(entries.Count + 1, Convert.ToUInt64(reader.GetValue(0)), reader.GetString(1),
+            entries.Add(new LeaderboardEntry(entries.Count > 0 && entries[^1].TimeMicroseconds == Convert.ToInt64(reader.GetValue(2)) ? entries[^1].Rank : entries.Count + 1, Convert.ToUInt64(reader.GetValue(0)), reader.GetString(1),
                 Convert.ToInt64(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3))));
         return entries;
     }
@@ -336,6 +349,9 @@ public sealed class RecordRepository(
         await using var transaction = await connection.BeginTransactionAsync(_shutdown.Token).ConfigureAwait(false);
         try
         {
+            var saved = await ReadReceiptAsync(connection, transaction, run.RunId).ConfigureAwait(false);
+            if (saved is not null) return saved;
+            await RequireRulesetAsync(connection, transaction, run.MapName, run.RulesetFingerprint).ConfigureAwait(false);
             await UpsertPlayerSeenAsync(connection, transaction, run, _shutdown.Token).ConfigureAwait(false);
             await UpsertMapAsync(connection, transaction, run.MapName, run.WorkshopId, run.CheckpointCount, _shutdown.Token).ConfigureAwait(false);
             var mapId = await GetMapIdAsync(connection, transaction, run.MapName, _shutdown.Token).ConfigureAwait(false);
@@ -360,6 +376,8 @@ public sealed class RecordRepository(
             if (isPb)
             {
                 await ReplaceSplitsAsync(connection, transaction, recordId, run.CheckpointSplits, _shutdown.Token).ConfigureAwait(false);
+                if (run.Replay is null)
+                    await DeleteReplayAsync(connection, transaction, recordId, false, _shutdown.Token).ConfigureAwait(false);
                 if (run.Replay is not null)
                     await ReplaceReplayAsync(connection, transaction, recordId, ReplayCodec.Encode(run.Replay), _shutdown.Token).ConfigureAwait(false);
                 await ReplaceValidationAsync(connection, transaction, recordId, run.Telemetry, _shutdown.Token).ConfigureAwait(false);
@@ -367,7 +385,7 @@ public sealed class RecordRepository(
             await TrackCompletedRunAsync(connection, transaction, run.SteamId, run.TimeMicroseconds, _shutdown.Token).ConfigureAwait(false);
             if (isPb)
                 await AppendPbHistoryAsync(connection, transaction, recordId, mapId, run.SteamId, "main", 0,
-                    existing?.Best, run.TimeMicroseconds, _shutdown.Token).ConfigureAwait(false);
+                    existing?.Best, run.TimeMicroseconds, run.FinishedAtUtc.UtcDateTime, _shutdown.Token).ConfigureAwait(false);
             var stageResults = new List<StageRecordResult>(run.StageTimes.Count);
             long stageStart = 0;
             for (var index = 0; index < run.StageTimes.Count; index++)
@@ -378,13 +396,15 @@ public sealed class RecordRepository(
                     stageTime, stageReplay, _shutdown.Token).ConfigureAwait(false));
                 stageStart += stageTime;
             }
+            var rank = await GetRankAsync(connection, mapId, best, _shutdown.Token, transaction).ConfigureAwait(false);
+            var result = new SaveRecordResult(isPb, existing?.Best, best, rank, stageResults);
+            await SaveReceiptAsync(connection, transaction, run.RunId, result, run.RulesetFingerprint, run.SteamId, run.MapName, "main", 0).ConfigureAwait(false);
             await transaction.CommitAsync(_shutdown.Token).ConfigureAwait(false);
-            var rank = await GetRankAsync(connection, mapId, best, _shutdown.Token).ConfigureAwait(false);
-            return new SaveRecordResult(isPb, existing?.Best, best, rank, stageResults);
+            return result;
         }
         catch
         {
-            await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);
+            try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ }
             throw;
         }
     }
@@ -447,7 +467,7 @@ public sealed class RecordRepository(
         var entries = new List<LeaderboardEntry>();
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
         while (await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
-            entries.Add(new LeaderboardEntry(entries.Count + 1, Convert.ToUInt64(reader.GetValue(0)), reader.GetString(1),
+            entries.Add(new LeaderboardEntry(entries.Count > 0 && entries[^1].TimeMicroseconds == Convert.ToInt64(reader.GetValue(2)) ? entries[^1].Rank : entries.Count + 1, Convert.ToUInt64(reader.GetValue(0)), reader.GetString(1),
                 Convert.ToInt64(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3))));
         return entries;
     }
@@ -740,54 +760,6 @@ public sealed class RecordRepository(
             Convert.ToInt32(reader.GetValue(5)));
     }
 
-    public async Task<DeletedPersonalBest?> DeletePersonalBestAsync(ulong steamId, string mapName)
-    {
-        await ReadyAsync().ConfigureAwait(false);
-        await using var connection = await OpenAsync().ConfigureAwait(false);
-        await using var transaction = await connection.BeginTransactionAsync(_shutdown.Token).ConfigureAwait(false);
-        try
-        {
-            long recordId;
-            string playerName;
-            long time;
-            int completions;
-            await using (var select = connection.CreateCommand())
-            {
-                select.Transaction = transaction;
-                select.CommandText = """
-                    SELECT r.id,p.last_name,r.best_time_us,r.completions
-                    FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-                    WHERE m.name=@map AND r.player_steam_id=@steam AND r.route_type='main' AND r.route_index=0
-                      AND r.style=0 AND r.mode='surf' FOR UPDATE
-                    """;
-                select.AddParameter("@map", mapName);
-                select.AddParameter("@steam", steamId);
-                await using var reader = await select.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-                if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
-                {
-                    await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);
-                    return null;
-                }
-                recordId = Convert.ToInt64(reader.GetValue(0));
-                playerName = reader.GetString(1);
-                time = Convert.ToInt64(reader.GetValue(2));
-                completions = Convert.ToInt32(reader.GetValue(3));
-            }
-            await using var delete = connection.CreateCommand();
-            delete.Transaction = transaction;
-            delete.CommandText = "DELETE FROM st_records WHERE id=@id";
-            delete.AddParameter("@id", recordId);
-            await delete.ExecuteNonQueryAsync(_shutdown.Token).ConfigureAwait(false);
-            await transaction.CommitAsync(_shutdown.Token).ConfigureAwait(false);
-            return new DeletedPersonalBest(steamId, playerName, mapName, time, completions);
-        }
-        catch
-        {
-            await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);
-            throw;
-        }
-    }
-
     public async Task AppendAdminAuditAsync(
         ulong actorSteamId, string actorName, string action, string target, string details)
     {
@@ -813,17 +785,23 @@ public sealed class RecordRepository(
         await ReadyAsync().ConfigureAwait(false);
         await using var connection = await OpenAsync().ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        // Rank every record before joining optional captures. Ties select the earliest PB, then Steam ID.
         command.CommandText = """
+            WITH ranked AS (
+                SELECT r.*, RANK() OVER (ORDER BY r.best_time_us) AS leaderboard_rank
+                FROM st_records r JOIN st_maps m ON m.id=r.map_id
+                WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
+            )
             SELECT p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,rp.frame_count,rp.duration_us,rp.compressed_frames
-            FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-            JOIN st_replays rp ON rp.record_id=r.id
-            WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
-            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset
+            FROM ranked r JOIN st_players p ON p.steam_id=r.player_steam_id
+            LEFT JOIN st_replays rp ON rp.record_id=r.id
+            WHERE r.leaderboard_rank=@rank ORDER BY r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
-        command.AddParameter("@map", mapName); command.AddParameter("@offset", Math.Clamp(rank, 1, 10) - 1);
+        command.AddParameter("@map", mapName); command.AddParameter("@rank", Math.Clamp(rank, 1, 10));
+        
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
-        return new StoredReplay(rank, reader.GetString(0), Convert.ToInt64(reader.GetValue(1)),
+        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(2)) return null;
+        return new StoredReplay(Math.Clamp(rank, 1, 10), reader.GetString(0), Convert.ToInt64(reader.GetValue(1)),
             new EncodedReplay(Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)),
                 Convert.ToInt32(reader.GetValue(4)), Convert.ToInt64(reader.GetValue(5)), (byte[])reader.GetValue(6)));
     }
@@ -833,18 +811,23 @@ public sealed class RecordRepository(
         await ReadyAsync().ConfigureAwait(false);
         await using var connection = await OpenAsync().ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        // Rank every record before joining optional captures. Ties select the earliest PB, then Steam ID.
         command.CommandText = """
+            WITH ranked AS (
+                SELECT r.*, RANK() OVER (ORDER BY r.best_time_us) AS leaderboard_rank
+                FROM st_records r JOIN st_maps m ON m.id=r.map_id
+                WHERE m.name=@map AND r.route_type='bonus' AND r.route_index=@bonus AND r.style=0 AND r.mode='surf'
+            )
             SELECT p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,rp.frame_count,rp.duration_us,rp.compressed_frames
-            FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-            JOIN st_replays rp ON rp.record_id=r.id
-            WHERE m.name=@map AND r.route_type='bonus' AND r.route_index=@bonus AND r.style=0 AND r.mode='surf'
-            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset
+            FROM ranked r JOIN st_players p ON p.steam_id=r.player_steam_id
+            LEFT JOIN st_replays rp ON rp.record_id=r.id
+            WHERE r.leaderboard_rank=@rank ORDER BY r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
-        command.AddParameter("@map", mapName); command.AddParameter("@bonus", bonus);
-        command.AddParameter("@offset", Math.Clamp(rank, 1, 10) - 1);
+        command.AddParameter("@map", mapName); command.AddParameter("@rank", Math.Clamp(rank, 1, 10));
+        command.AddParameter("@bonus", bonus);
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
-        return new StoredReplay(rank, reader.GetString(0), Convert.ToInt64(reader.GetValue(1)),
+        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(2)) return null;
+        return new StoredReplay(Math.Clamp(rank, 1, 10), reader.GetString(0), Convert.ToInt64(reader.GetValue(1)),
             new EncodedReplay(Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)),
                 Convert.ToInt32(reader.GetValue(4)), Convert.ToInt64(reader.GetValue(5)), (byte[])reader.GetValue(6)));
     }
@@ -854,20 +837,25 @@ public sealed class RecordRepository(
         await ReadyAsync().ConfigureAwait(false);
         await using var connection = await OpenAsync().ConfigureAwait(false);
         await using var command = connection.CreateCommand();
+        // Rank every record before joining optional captures. Ties select the earliest PB, then Steam ID.
         command.CommandText = """
-            SELECT p.last_name,sr.best_time_us,rp.format_version,rp.sample_rate_hz,rp.frame_count,rp.duration_us,rp.compressed_frames
-            FROM st_stage_records sr JOIN st_maps m ON m.id=sr.map_id JOIN st_players p ON p.steam_id=sr.player_steam_id
-            JOIN st_stage_replays rp ON rp.stage_record_id=sr.id
-            WHERE m.name=@map AND sr.stage=@stage
-            ORDER BY sr.best_time_us,sr.pb_updated_at,sr.player_steam_id LIMIT 1 OFFSET @offset
+            WITH ranked AS (
+                SELECT r.*, RANK() OVER (ORDER BY r.best_time_us) AS leaderboard_rank
+                FROM st_stage_records r JOIN st_maps m ON m.id=r.map_id
+                WHERE m.name=@map AND r.stage=@stage
+            )
+            SELECT p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,rp.frame_count,rp.duration_us,rp.compressed_frames
+            FROM ranked r JOIN st_players p ON p.steam_id=r.player_steam_id
+            LEFT JOIN st_stage_replays rp ON rp.stage_record_id=r.id
+            WHERE r.leaderboard_rank=@rank ORDER BY r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
-        command.AddParameter("@map", mapName); command.AddParameter("@stage", stage);
-        command.AddParameter("@offset", Math.Clamp(rank, 1, 10)-1);
+        command.AddParameter("@map", mapName); command.AddParameter("@rank", Math.Clamp(rank, 1, 10));
+        command.AddParameter("@stage", stage);
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
-        return new StoredReplay(rank,reader.GetString(0),Convert.ToInt64(reader.GetValue(1)),
-            new EncodedReplay(Convert.ToInt32(reader.GetValue(2)),Convert.ToInt32(reader.GetValue(3)),
-                Convert.ToInt32(reader.GetValue(4)),Convert.ToInt64(reader.GetValue(5)),(byte[])reader.GetValue(6)));
+        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(2)) return null;
+        return new StoredReplay(Math.Clamp(rank, 1, 10), reader.GetString(0), Convert.ToInt64(reader.GetValue(1)),
+            new EncodedReplay(Convert.ToInt32(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)),
+                Convert.ToInt32(reader.GetValue(4)), Convert.ToInt64(reader.GetValue(5)), (byte[])reader.GetValue(6)));
     }
 
     public async Task<ReplayAdminDetails?> GetReplayAdminDetailsAsync(string mapName, int rank)
@@ -879,14 +867,15 @@ public sealed class RecordRepository(
             SELECT r.player_steam_id,p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,
                    rp.frame_count,rp.duration_us,OCTET_LENGTH(rp.compressed_frames)
             FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-            JOIN st_replays rp ON rp.record_id=r.id
+            LEFT JOIN st_replays rp ON rp.record_id=r.id
             WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
-            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset
+            AND (SELECT 1+COUNT(*) FROM st_records f WHERE f.map_id=r.map_id AND f.route_type=r.route_type AND f.route_index=r.route_index AND f.style=r.style AND f.mode=r.mode AND f.best_time_us<r.best_time_us)=@rank
+            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
         var safeRank = Math.Clamp(rank, 1, 10);
-        command.AddParameter("@map", mapName); command.AddParameter("@offset", safeRank - 1);
+        command.AddParameter("@map", mapName); command.AddParameter("@rank", safeRank);
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
+        if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(3)) return null;
         return new ReplayAdminDetails(safeRank, Convert.ToUInt64(reader.GetValue(0)), reader.GetString(1), mapName,
             Convert.ToInt64(reader.GetValue(2)), Convert.ToInt32(reader.GetValue(3)), Convert.ToInt32(reader.GetValue(4)),
             Convert.ToInt32(reader.GetValue(5)), Convert.ToInt64(reader.GetValue(6)), Convert.ToInt32(reader.GetValue(7)));
@@ -900,12 +889,13 @@ public sealed class RecordRepository(
         command.CommandText="""
             SELECT sr.player_steam_id,p.last_name,sr.best_time_us,rp.format_version,rp.sample_rate_hz,rp.frame_count,rp.duration_us,OCTET_LENGTH(rp.compressed_frames)
             FROM st_stage_records sr JOIN st_maps m ON m.id=sr.map_id JOIN st_players p ON p.steam_id=sr.player_steam_id
-            JOIN st_stage_replays rp ON rp.stage_record_id=sr.id WHERE m.name=@map AND sr.stage=@stage
-            ORDER BY sr.best_time_us,sr.pb_updated_at,sr.player_steam_id LIMIT 1 OFFSET @offset
+            LEFT JOIN st_stage_replays rp ON rp.stage_record_id=sr.id WHERE m.name=@map AND sr.stage=@stage
+            AND (SELECT 1+COUNT(*) FROM st_stage_records f WHERE f.map_id=sr.map_id AND f.stage=sr.stage AND f.best_time_us<sr.best_time_us)=@rank
+            ORDER BY sr.best_time_us,sr.pb_updated_at,sr.player_steam_id LIMIT 1
             """;
-        var safeRank=Math.Clamp(rank,1,10); command.AddParameter("@map",mapName); command.AddParameter("@stage",stage); command.AddParameter("@offset",safeRank-1);
+        var safeRank=Math.Clamp(rank,1,10); command.AddParameter("@map",mapName); command.AddParameter("@stage",stage); command.AddParameter("@rank", safeRank);
         await using var reader=await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
+        if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(3)) return null;
         return new(safeRank,Convert.ToUInt64(reader.GetValue(0)),reader.GetString(1),mapName,Convert.ToInt64(reader.GetValue(2)),
             Convert.ToInt32(reader.GetValue(3)),Convert.ToInt32(reader.GetValue(4)),Convert.ToInt32(reader.GetValue(5)),
             Convert.ToInt64(reader.GetValue(6)),Convert.ToInt32(reader.GetValue(7)));
@@ -920,14 +910,15 @@ public sealed class RecordRepository(
             SELECT r.player_steam_id,p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,
                    rp.frame_count,rp.duration_us,OCTET_LENGTH(rp.compressed_frames)
             FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-            JOIN st_replays rp ON rp.record_id=r.id
+            LEFT JOIN st_replays rp ON rp.record_id=r.id
             WHERE m.name=@map AND r.route_type='bonus' AND r.route_index=@bonus AND r.style=0 AND r.mode='surf'
-            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset
+            AND (SELECT 1+COUNT(*) FROM st_records f WHERE f.map_id=r.map_id AND f.route_type=r.route_type AND f.route_index=r.route_index AND f.style=r.style AND f.mode=r.mode AND f.best_time_us<r.best_time_us)=@rank
+            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
         var safeRank=Math.Clamp(rank,1,10);
-        command.AddParameter("@map",mapName);command.AddParameter("@bonus",bonus);command.AddParameter("@offset",safeRank-1);
+        command.AddParameter("@map",mapName);command.AddParameter("@bonus",bonus);command.AddParameter("@rank", safeRank);
         await using var reader=await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-        if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
+        if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(3)) return null;
         return new(safeRank,Convert.ToUInt64(reader.GetValue(0)),reader.GetString(1),mapName,Convert.ToInt64(reader.GetValue(2)),
             Convert.ToInt32(reader.GetValue(3)),Convert.ToInt32(reader.GetValue(4)),Convert.ToInt32(reader.GetValue(5)),
             Convert.ToInt64(reader.GetValue(6)),Convert.ToInt32(reader.GetValue(7)));
@@ -941,9 +932,9 @@ public sealed class RecordRepository(
         await using var command=connection.CreateCommand();
         command.CommandText="""
             DELETE rp FROM st_stage_replays rp JOIN st_stage_records sr ON sr.id=rp.stage_record_id JOIN st_maps m ON m.id=sr.map_id
-            WHERE m.name=@map AND sr.stage=@stage AND sr.player_steam_id=@steam
+            WHERE m.name=@map AND sr.stage=@stage AND sr.player_steam_id=@steam AND sr.best_time_us=@time
             """;
-        command.AddParameter("@map",mapName); command.AddParameter("@stage",stage); command.AddParameter("@steam",details.SteamId);
+        command.AddParameter("@map",mapName); command.AddParameter("@stage",stage); command.AddParameter("@steam",details.SteamId); command.AddParameter("@time",details.TimeMicroseconds);
         return await command.ExecuteNonQueryAsync(_shutdown.Token).ConfigureAwait(false)==1?details:null;
     }
 
@@ -962,13 +953,14 @@ public sealed class RecordRepository(
                     SELECT rp.record_id,r.player_steam_id,p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,
                            rp.frame_count,rp.duration_us,OCTET_LENGTH(rp.compressed_frames)
                     FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-                    JOIN st_replays rp ON rp.record_id=r.id
+                    LEFT JOIN st_replays rp ON rp.record_id=r.id
                     WHERE m.name=@map AND r.route_type='bonus' AND r.route_index=@bonus AND r.style=0 AND r.mode='surf'
-                    ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset FOR UPDATE
+                    AND (SELECT 1+COUNT(*) FROM st_records f WHERE f.map_id=r.map_id AND f.route_type=r.route_type AND f.route_index=r.route_index AND f.style=r.style AND f.mode=r.mode AND f.best_time_us<r.best_time_us)=@rank
+                    ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 FOR UPDATE
                     """;
-                select.AddParameter("@map",mapName);select.AddParameter("@bonus",bonus);select.AddParameter("@offset",safeRank-1);
+                select.AddParameter("@map",mapName);select.AddParameter("@bonus",bonus);select.AddParameter("@rank", safeRank);
                 await using var reader=await select.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-                if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)){await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);return null;}
+                if(!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(0)){try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ }return null;}
                 recordId=Convert.ToInt64(reader.GetValue(0));
                 details=new(safeRank,Convert.ToUInt64(reader.GetValue(1)),reader.GetString(2),mapName,Convert.ToInt64(reader.GetValue(3)),
                     Convert.ToInt32(reader.GetValue(4)),Convert.ToInt32(reader.GetValue(5)),Convert.ToInt32(reader.GetValue(6)),
@@ -979,7 +971,7 @@ public sealed class RecordRepository(
             if(await delete.ExecuteNonQueryAsync(_shutdown.Token).ConfigureAwait(false)!=1) throw new InvalidOperationException("Expected to delete one bonus replay.");
             await transaction.CommitAsync(_shutdown.Token).ConfigureAwait(false);return details;
         }
-        catch{await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);throw;}
+        catch{try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ }throw;}
     }
 
     public async Task<RecordValidationDetails?> GetRecordValidationDetailsAsync(string mapName, int rank)
@@ -993,10 +985,11 @@ public sealed class RecordRepository(
             FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
             LEFT JOIN st_run_validation v ON v.record_id=r.id
             WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
-            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset
+            AND (SELECT 1+COUNT(*) FROM st_records f WHERE f.map_id=r.map_id AND f.route_type=r.route_type AND f.route_index=r.route_index AND f.style=r.style AND f.mode=r.mode AND f.best_time_us<r.best_time_us)=@rank
+            ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1
             """;
         var safeRank = Math.Clamp(rank, 1, 10);
-        command.AddParameter("@map", mapName); command.AddParameter("@offset", safeRank - 1);
+        command.AddParameter("@map", mapName); command.AddParameter("@rank", safeRank);
         await using var reader = await command.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
         if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false)) return null;
         if (reader.IsDBNull(2))
@@ -1024,15 +1017,16 @@ public sealed class RecordRepository(
                     SELECT rp.record_id,r.player_steam_id,p.last_name,r.best_time_us,rp.format_version,rp.sample_rate_hz,
                            rp.frame_count,rp.duration_us,OCTET_LENGTH(rp.compressed_frames)
                     FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
-                    JOIN st_replays rp ON rp.record_id=r.id
+                    LEFT JOIN st_replays rp ON rp.record_id=r.id
                     WHERE m.name=@map AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
-                    ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 OFFSET @offset FOR UPDATE
+                    AND (SELECT 1+COUNT(*) FROM st_records f WHERE f.map_id=r.map_id AND f.route_type=r.route_type AND f.route_index=r.route_index AND f.style=r.style AND f.mode=r.mode AND f.best_time_us<r.best_time_us)=@rank
+                    ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT 1 FOR UPDATE
                     """;
-                select.AddParameter("@map", mapName); select.AddParameter("@offset", safeRank - 1);
+                select.AddParameter("@map", mapName); select.AddParameter("@rank", safeRank);
                 await using var reader = await select.ExecuteReaderAsync(_shutdown.Token).ConfigureAwait(false);
-                if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false))
+                if (!await reader.ReadAsync(_shutdown.Token).ConfigureAwait(false) || reader.IsDBNull(0))
                 {
-                    await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);
+                    try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ }
                     return null;
                 }
                 recordId = Convert.ToInt64(reader.GetValue(0));
@@ -1051,7 +1045,7 @@ public sealed class RecordRepository(
         }
         catch
         {
-            await transaction.RollbackAsync(_shutdown.Token).ConfigureAwait(false);
+            try { await transaction.RollbackAsync(CancellationToken.None).ConfigureAwait(false); } catch { /* Preserve the original failure, including an uncertain commit. */ }
             throw;
         }
     }
@@ -1139,10 +1133,10 @@ public sealed class RecordRepository(
         await using var cmd = c.CreateCommand(); cmd.Transaction = t;
         cmd.CommandText = """
             INSERT INTO st_players (steam_id,last_name,first_seen_at,last_seen_at,first_server_id,last_server_id,total_connections)
-            VALUES (@steam,@name,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),@server,@server,1)
-            ON DUPLICATE KEY UPDATE last_name=VALUES(last_name),last_seen_at=UTC_TIMESTAMP(6),last_server_id=VALUES(last_server_id)
+            VALUES (@steam,@name,@seen,@seen,@server,@server,1)
+            ON DUPLICATE KEY UPDATE last_name=IF(@seen>=last_seen_at,VALUES(last_name),last_name),last_server_id=IF(@seen>=last_seen_at,VALUES(last_server_id),last_server_id),first_seen_at=LEAST(first_seen_at,@seen),last_seen_at=GREATEST(last_seen_at,@seen)
             """;
-        cmd.AddParameter("@steam", run.SteamId); cmd.AddParameter("@name", run.PlayerName); cmd.AddParameter("@server", run.ServerId);
+        cmd.AddParameter("@seen", run.FinishedAtUtc.UtcDateTime); cmd.AddParameter("@steam", run.SteamId); cmd.AddParameter("@name", run.PlayerName); cmd.AddParameter("@server", run.ServerId);
         await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 
@@ -1153,7 +1147,7 @@ public sealed class RecordRepository(
             INSERT INTO st_maps (name,workshop_id,checkpoint_count,created_at,updated_at)
             VALUES (@name,@workshop,@cps,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6))
             ON DUPLICATE KEY UPDATE workshop_id=COALESCE(VALUES(workshop_id),workshop_id),
-                checkpoint_count=GREATEST(checkpoint_count,VALUES(checkpoint_count)),updated_at=UTC_TIMESTAMP(6)
+                updated_at=UTC_TIMESTAMP(6)
             """;
         cmd.AddParameter("@name", name); cmd.AddParameter("@workshop", string.IsNullOrWhiteSpace(workshop) ? null : workshop); cmd.AddParameter("@cps", cps);
         await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
@@ -1179,10 +1173,10 @@ public sealed class RecordRepository(
         await using var cmd = c.CreateCommand(); cmd.Transaction = t;
         cmd.CommandText = """
             INSERT INTO st_records (map_id,player_steam_id,best_time_us,completions,first_completed_at,last_completed_at,pb_updated_at,last_server_id)
-            VALUES (@map,@steam,@time,1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),@server);
+            VALUES (@map,@steam,@time,1,@finished,@finished,@finished,@server);
             SELECT LAST_INSERT_ID()
             """;
-        cmd.AddParameter("@map", mapId); cmd.AddParameter("@steam", run.SteamId); cmd.AddParameter("@time", run.TimeMicroseconds); cmd.AddParameter("@server", run.ServerId);
+        cmd.AddParameter("@map", mapId); cmd.AddParameter("@steam", run.SteamId); cmd.AddParameter("@time", run.TimeMicroseconds); cmd.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime); cmd.AddParameter("@server", run.ServerId);
         return Convert.ToInt64(await cmd.ExecuteScalarAsync(token).ConfigureAwait(false));
     }
 
@@ -1190,9 +1184,10 @@ public sealed class RecordRepository(
     {
         await using var cmd = c.CreateCommand(); cmd.Transaction = t;
         cmd.CommandText = """
-            UPDATE st_records SET completions=completions+1,last_completed_at=UTC_TIMESTAMP(6),last_server_id=@server,
-                best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,UTC_TIMESTAMP(6),pb_updated_at) WHERE id=@id
+            UPDATE st_records SET completions=completions+1,last_server_id=IF(@finished>=last_completed_at,@server,last_server_id),first_completed_at=LEAST(first_completed_at,@finished),last_completed_at=GREATEST(last_completed_at,@finished),
+                best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,@finished,pb_updated_at) WHERE id=@id
             """;
+        cmd.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime);
         cmd.AddParameter("@server", run.ServerId); cmd.AddParameter("@pb", pb ? 1 : 0); cmd.AddParameter("@time", run.TimeMicroseconds); cmd.AddParameter("@id", id);
         await cmd.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
@@ -1228,29 +1223,32 @@ public sealed class RecordRepository(
             insert.CommandText = """
                 INSERT INTO st_stage_records
                     (map_id,player_steam_id,stage,best_time_us,completions,first_completed_at,last_completed_at,pb_updated_at,last_server_id)
-                VALUES (@map,@steam,@stage,@time,1,UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),UTC_TIMESTAMP(6),@server);
+                VALUES (@map,@steam,@stage,@time,1,@finished,@finished,@finished,@server);
                 SELECT LAST_INSERT_ID()
                 """;
             insert.AddParameter("@map", mapId); insert.AddParameter("@steam", run.SteamId); insert.AddParameter("@stage", stage);
-            insert.AddParameter("@time", time); insert.AddParameter("@server", run.ServerId);
+            insert.AddParameter("@time", time); insert.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime); insert.AddParameter("@server", run.ServerId);
             id = Convert.ToInt64(await insert.ExecuteScalarAsync(token).ConfigureAwait(false));
         }
         else
         {
             await using var update = c.CreateCommand(); update.Transaction = t;
             update.CommandText = """
-                UPDATE st_stage_records SET completions=completions+1,last_completed_at=UTC_TIMESTAMP(6),last_server_id=@server,
-                    best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,UTC_TIMESTAMP(6),pb_updated_at)
+                UPDATE st_stage_records SET completions=completions+1,last_server_id=IF(@finished>=last_completed_at,@server,last_server_id),first_completed_at=LEAST(first_completed_at,@finished),last_completed_at=GREATEST(last_completed_at,@finished),
+                    best_time_us=IF(@pb=1,@time,best_time_us),pb_updated_at=IF(@pb=1,@finished,pb_updated_at)
                 WHERE id=@id
                 """;
+            update.AddParameter("@finished", run.FinishedAtUtc.UtcDateTime);
             update.AddParameter("@server", run.ServerId); update.AddParameter("@pb", isPb ? 1 : 0);
             update.AddParameter("@time", time); update.AddParameter("@id", id.Value);
             await update.ExecuteNonQueryAsync(token).ConfigureAwait(false);
         }
+        if (isPb && replay is null)
+            await DeleteReplayAsync(c, t, id!.Value, true, token).ConfigureAwait(false);
         if (isPb && replay is not null)
             await ReplaceStageReplayAsync(c,t,id!.Value,ReplayCodec.Encode(replay),token).ConfigureAwait(false);
         if (isPb)
-            await AppendStagePbHistoryAsync(c,t,id!.Value,mapId,run.SteamId,stage,previous,time,token).ConfigureAwait(false);
+            await AppendStagePbHistoryAsync(c,t,id!.Value,mapId,run.SteamId,stage,previous,time,run.FinishedAtUtc.UtcDateTime,token).ConfigureAwait(false);
         var best = isPb ? time : previous!.Value;
         await using var rank = c.CreateCommand(); rank.Transaction = t;
         rank.CommandText = "SELECT 1+COUNT(*) FROM st_stage_records WHERE map_id=@map AND stage=@stage AND best_time_us<@best";
@@ -1259,9 +1257,9 @@ public sealed class RecordRepository(
             Convert.ToInt32(await rank.ExecuteScalarAsync(token).ConfigureAwait(false)));
     }
 
-    private static async Task<int> GetRankAsync(DbConnection c, long mapId, long best, CancellationToken token)
+    private static async Task<int> GetRankAsync(DbConnection c, long mapId, long best, CancellationToken token, DbTransaction? transaction = null)
     {
-        await using var cmd=c.CreateCommand(); cmd.CommandText="SELECT 1+COUNT(*) FROM st_records WHERE map_id=@map AND route_type='main' AND route_index=0 AND style=0 AND mode='surf' AND best_time_us<@best"; cmd.AddParameter("@map",mapId); cmd.AddParameter("@best",best);
+        await using var cmd=c.CreateCommand(); cmd.Transaction=transaction; cmd.CommandText="SELECT 1+COUNT(*) FROM st_records WHERE map_id=@map AND route_type='main' AND route_index=0 AND style=0 AND mode='surf' AND best_time_us<@best"; cmd.AddParameter("@map",mapId); cmd.AddParameter("@best",best);
         return Convert.ToInt32(await cmd.ExecuteScalarAsync(token).ConfigureAwait(false));
     }
 
@@ -1330,25 +1328,36 @@ public sealed class RecordRepository(
     }
 
     private static async Task AppendPbHistoryAsync(DbConnection c, DbTransaction t, long recordId, long mapId,
-        ulong steamId, string routeType, int routeIndex, long? previous, long time, CancellationToken token)
+        ulong steamId, string routeType, int routeIndex, long? previous, long time, DateTime finishedAt, CancellationToken token)
     {
         await using var command = c.CreateCommand(); command.Transaction=t;
-        command.CommandText = "INSERT INTO st_pb_history(record_id,player_steam_id,map_id,route_type,route_index,previous_time_us,new_time_us,achieved_at) VALUES(@record,@steam,@map,@route,@index,@previous,@time,UTC_TIMESTAMP(6))";
+        command.CommandText = "INSERT INTO st_pb_history(record_id,player_steam_id,map_id,route_type,route_index,previous_time_us,new_time_us,achieved_at) VALUES(@record,@steam,@map,@route,@index,@previous,@time,@finished)";
         command.AddParameter("@record",recordId); command.AddParameter("@steam",steamId); command.AddParameter("@map",mapId);
         command.AddParameter("@route",routeType); command.AddParameter("@index",routeIndex);
-        command.AddParameter("@previous",previous is null ? DBNull.Value : previous.Value); command.AddParameter("@time",time);
+        command.AddParameter("@finished",finishedAt); command.AddParameter("@previous",previous is null ? DBNull.Value : previous.Value); command.AddParameter("@time",time);
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 
     private static async Task AppendStagePbHistoryAsync(DbConnection c,DbTransaction t,long recordId,long mapId,
-        ulong steamId,int stage,long? previous,long time,CancellationToken token)
+        ulong steamId,int stage,long? previous,long time,DateTime finishedAt,CancellationToken token)
     {
         await using var command=c.CreateCommand();command.Transaction=t;
-        command.CommandText="INSERT INTO st_stage_pb_history(stage_record_id,player_steam_id,map_id,stage,previous_time_us,new_time_us,achieved_at) VALUES(@record,@steam,@map,@stage,@previous,@time,UTC_TIMESTAMP(6))";
+        command.CommandText="INSERT INTO st_stage_pb_history(stage_record_id,player_steam_id,map_id,stage,previous_time_us,new_time_us,achieved_at) VALUES(@record,@steam,@map,@stage,@previous,@time,@finished)";
         command.AddParameter("@record",recordId);command.AddParameter("@steam",steamId);command.AddParameter("@map",mapId);command.AddParameter("@stage",stage);
-        command.AddParameter("@previous",previous is null?DBNull.Value:previous.Value);command.AddParameter("@time",time);
+        command.AddParameter("@finished",finishedAt); command.AddParameter("@previous",previous is null?DBNull.Value:previous.Value);command.AddParameter("@time",time);
         await command.ExecuteNonQueryAsync(token).ConfigureAwait(false);
     }
 
-    public void Dispose() { _shutdown.Cancel(); _shutdown.Dispose(); }
+    public void Dispose()
+    {
+        // Finish accepted disk writes without waiting for database availability or game-thread callbacks.
+        if (!Task.WhenAll(_acceptedWrites.Values.ToArray()).Wait(TimeSpan.FromSeconds(5)))
+            logger.LogWarning("Pending-run disk writes exceeded the five-second shutdown drain; they continue in the background.");
+        _shutdown.Cancel();
+    }
 }
+
+
+
+
+

@@ -19,34 +19,34 @@ if (-not $SnapshotPath.StartsWith($deploymentRoot + [System.IO.Path]::DirectoryS
     throw "Snapshot must be an existing child of ${deploymentRoot}: $SnapshotPath"
 }
 
-$serverExe = "C:\CS2Server\server\game\bin\win64\cs2.exe"
-$running = Get-Process cs2 -ErrorAction SilentlyContinue | Where-Object Path -eq $serverExe
+$serverExecutables = @($SwiftlyRoots | ForEach-Object {
+    [IO.Path]::GetFullPath((Join-Path $_ '..\..\..\bin\win64\cs2.exe'))
+})
+$running = Get-Process cs2 -ErrorAction SilentlyContinue | Where-Object { $_.Path -in $serverExecutables }
 if ($running) { throw "Stop all local CS2 server instances before rollback. Running PID(s): $($running.Id -join ', ')." }
 
-$safetyRoot = Join-Path $deploymentRoot ("pre-rollback-" + (Get-Date -Format "yyyyMMdd-HHmmss"))
-New-Item -ItemType Directory -Force -Path $safetyRoot | Out-Null
+$safetyRoot = Join-Path $deploymentRoot ("pre-rollback-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N"))
+. (Join-Path $PSScriptRoot 'PluginPayloadSwap.ps1')
+$targetManifest = Join-Path $SnapshotPath 'deployment-targets.json'
+$recordedTargets = if (Test-Path -LiteralPath $targetManifest) { @(Get-Content -Raw -LiteralPath $targetManifest | ConvertFrom-Json) } else { @() }
+$targets = @()
+$legacyNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
 foreach ($swiftlyRootValue in $SwiftlyRoots) {
-    $swiftlyRoot = [System.IO.Path]::GetFullPath($swiftlyRootValue)
-    $pluginDirectory = [System.IO.Path]::GetFullPath((Join-Path $swiftlyRoot "plugins\SurfTimer"))
-    $expectedParent = [System.IO.Path]::GetFullPath((Join-Path $swiftlyRoot "plugins"))
-    if ([System.IO.Path]::GetDirectoryName($pluginDirectory) -ne $expectedParent) {
-        throw "Resolved plugin directory escaped its expected parent: $pluginDirectory"
+    $swiftlyRoot = [IO.Path]::GetFullPath($swiftlyRootValue).TrimEnd([IO.Path]::DirectorySeparatorChar)
+    if ($recordedTargets.Count -gt 0) {
+        $matchesForRoot = @($recordedTargets | Where-Object Root -eq $swiftlyRoot)
+        if ($matchesForRoot.Count -ne 1 -or -not $matchesForRoot[0].Existed) { throw "No previous plugin payload was recorded for $swiftlyRoot." }
+        $source = [IO.Path]::GetFullPath((Join-Path $SnapshotPath $matchesForRoot[0].Snapshot))
+        if ([IO.Path]::GetDirectoryName($source) -ne $SnapshotPath.TrimEnd([IO.Path]::DirectorySeparatorChar)) { throw "Snapshot payload escaped its snapshot directory." }
     }
-    $instanceName = Split-Path -Leaf $swiftlyRoot
-    $source = Join-Path $SnapshotPath $instanceName
-    if (-not (Test-Path -LiteralPath (Join-Path $source "SurfTimer.dll"))) {
-        throw "Snapshot payload is missing for $instanceName."
+    else {
+        $instanceName = Split-Path -Leaf $swiftlyRoot
+        if (-not $legacyNames.Add($instanceName)) { throw "Legacy snapshot names collide; select one instance at a time." }
+        $source = Join-Path $SnapshotPath $instanceName
     }
-    if (Test-Path -LiteralPath $pluginDirectory) {
-        $safety = Join-Path $safetyRoot $instanceName
-        New-Item -ItemType Directory -Force -Path $safety | Out-Null
-        Copy-Item -Path (Join-Path $pluginDirectory "*") -Destination $safety -Recurse -Force
-        Remove-Item -LiteralPath $pluginDirectory -Recurse -Force
-    }
-    New-Item -ItemType Directory -Force -Path $pluginDirectory | Out-Null
-    Copy-Item -Path (Join-Path $source "*") -Destination $pluginDirectory -Recurse -Force
-    Write-Host "Restored $instanceName from $source"
+    $targets += [pscustomobject]@{ Root = $swiftlyRoot; Source = $source }
 }
-
+Invoke-PluginPayloadSwap -Targets $targets -SnapshotRoot $safetyRoot
 Write-Host "Rollback completed. Pre-rollback safety snapshot: $safetyRoot"
-Write-Host "Plugin files, including the snapshotted per-server configuration, were restored."
+Write-Host "Effective SwiftlyS2 configs and data outside the plugin payload were preserved."
+

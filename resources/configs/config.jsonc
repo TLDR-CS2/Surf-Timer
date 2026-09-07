@@ -2,13 +2,49 @@
   "SurfTimer": {
     // Set a unique value on every server sharing the central database.
     "ServerId": "change-me",
+    // Set this to the same designated ServerId on every shared-database instance.
+    // Empty uses the first server to claim st_catalog_authority; ownership persists in the database.
+    "CatalogAuthorityServerId": "",
+    // Replay memory/native capture limit; runs may continue without a replay beyond this limit.
+    "MaximumReplayMinutes": 30,
 
     // Named connection from addons/swiftlys2/configs/database.jsonc.
     "DatabaseConnection": "surftimer",
 
+    // Disabled skips all timer services until the plugin is reloaded after enabling it.
     "Enabled": true,
     "DebugLogging": false,
     "HudRefreshRateHz": 64,
+
+    "SplitComparisons": {
+      "Enabled": true,
+      // PB, WR, Both, or Off.
+      "Reference": "Both",
+      "HudDurationSeconds": 4
+    },
+
+    "Announcements": {
+      "Enabled": true,
+      "WorldRecords": true,
+      "TopTen": true,
+      "FirstCompletions": true
+    },
+
+    "ZoneVisibility": {
+      "Enabled": true,
+      "RenderAllMaps": true,
+      "Maps": [
+        "surf_boreas",
+        "surf_kitsune",
+        "surf_mesa_revo",
+        "surf_mom"
+      ],
+      "Red": 64,
+      "Green": 255,
+      "Blue": 112,
+      "Alpha": 210,
+      "Width": 1.5
+    },
 
     // Disable this entire block when a dedicated RockTheVote plugin owns !rtv/!nominate.
     "MapVoting": {
@@ -24,6 +60,13 @@
       "CandidateCount": 5,
       "RecentMapExclusionCount": 3,
       "ExtendMapMinutes": 10,
+      "MaximumMapExtensions": 3,
+      // Idle players are ignored when calculating RTV and early-close thresholds.
+      "ExcludeAfkPlayers": true,
+      "AfkAfterSeconds": 180,
+      // Repeated runtime compatibility failures remove a map from voting until it certifies successfully.
+      "AutomaticQuarantineEnabled": true,
+      "CompatibilityFailuresBeforeQuarantine": 2,
       // Easy servers use 1-2; hard uses 1-7; expert uses 4-7.
       "MinimumTier": 1,
       "MaximumTier": 2,
@@ -43,8 +86,55 @@
         { "Name": "surf_jive", "WorkshopId": "3318285030" },
         { "Name": "surf_cannonball", "WorkshopId": "3152119098" },
         { "Name": "surf_sippysip", "WorkshopId": "3246776437" },
-        { "Name": "surf_lt_omnific", "WorkshopId": "3660894345" }
+        { "Name": "surf_lt_omnific", "WorkshopId": "3660894345" },
+        { "Name": "surf_summit", "WorkshopId": "3650611306" },
+        { "Name": "surf_nyx", "WorkshopId": "3129698096" },
+        { "Name": "surf_ace", "WorkshopId": "3088413071" },
+        { "Name": "surf_me", "WorkshopId": "3248211716" },
+        { "Name": "surf_beginner", "WorkshopId": "3070321829" },
+        { "Name": "surf_whiteout", "WorkshopId": "3296258256" },
+        { "Name": "surf_lux", "WorkshopId": "3280013431" },
+        { "Name": "surf_utopia_njv", "WorkshopId": "3073875025" },
+        { "Name": "surf_atrium", "WorkshopId": "3130141240" },
+        { "Name": "surf_lullaby", "WorkshopId": "3271149992" },
+        { "Name": "surf_rookie", "WorkshopId": "3082548297" },
+        { "Name": "surf_benevolent", "WorkshopId": "3098972556" },
+        { "Name": "surf_race", "WorkshopId": "3259650654" },
+        { "Name": "surf_cyberwave", "WorkshopId": "3167714768" },
+        { "Name": "surf_rookie2", "WorkshopId": "3617159050" },
+        { "Name": "surf_minecraft_2020", "WorkshopId": "3420606769" },
+        { "Name": "surf_slob", "WorkshopId": "3212207205" },
+        { "Name": "surf_sandtrap2", "WorkshopId": "3303121302" },
+        { "Name": "surf_dojo", "WorkshopId": "3287151811" },
+        { "Name": "surf_paradise", "WorkshopId": "3391598488" },
+        { "Name": "surf_longreach", "WorkshopId": "3105967738" },
+        { "Name": "surf_6", "WorkshopId": "3306251447" },
+        { "Name": "surf_1day", "WorkshopId": "3331512455" },
+        { "Name": "surf_oompa_loompa", "WorkshopId": "3335810135" },
+        { "Name": "surf_scarlet", "WorkshopId": "3423231772" },
+        { "Name": "surf_quantum_njv", "WorkshopId": "3410482882" },
+        { "Name": "surf_forbidden_tomb", "WorkshopId": "3332027866" },
+        { "Name": "surf_overgrowth", "WorkshopId": "3333270287" },
+        { "Name": "surf_ambient_njv", "WorkshopId": "3402014847" },
+        { "Name": "surf_beginner_hell", "WorkshopId": "3430172550" },
+        { "Name": "surf_tundra_v2", "WorkshopId": "3412847937" },
+        { "Name": "surf_conserve", "WorkshopId": "3487164265" },
+        { "Name": "surf_tycho_fix", "WorkshopId": "3425903417" },
+        { "Name": "surf_innokia", "WorkshopId": "3435482464" },
+        { "Name": "surf_castlewalls", "WorkshopId": "3437384087" },
+        { "Name": "surf_nyze", "WorkshopId": "3534202802" },
+        { "Name": "surf_syria_again", "WorkshopId": "3440106952" },
+        { "Name": "surf_bugs", "WorkshopId": "3445707890" },
+        { "Name": "surf_sinsane_ksf", "WorkshopId": "3446916582" },
+        { "Name": "surf_shade", "WorkshopId": "3448016341" },
+        { "Name": "surf_glow", "WorkshopId": "3454592243" },
+        { "Name": "surf_diamond_beta1", "WorkshopId": "3460875224" },
+        { "Name": "surf_grid", "WorkshopId": "3473073810" },
+        { "Name": "surf_selenka", "WorkshopId": "3476698795" },
+        { "Name": "surf_pyrism", "WorkshopId": "3573822509" }
       ]
     }
   }
 }
+
+

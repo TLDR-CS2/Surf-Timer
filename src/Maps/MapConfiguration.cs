@@ -14,9 +14,12 @@ public sealed record MapConfiguration
     public int? CheckpointCount { get; init; }
     public string? StagePrefix { get; init; }
     public int StageCount { get; init; }
+    // Enable only after live verification of the teleport/start boundary against full-run splits.
+    public bool IndependentStageRecordsCertified { get; init; }
     public string BonusPrefix { get; init; } = "bonus";
     public int BonusCount { get; init; }
     public int MaxVelocity { get; init; } = 3500;
+    public IReadOnlyList<string> CancelTriggers { get; init; } = [];
 }
 
 public sealed record MapValidation(bool IsValid, IReadOnlyList<string> Issues)
@@ -158,5 +161,7 @@ public sealed class MapConfigurationProvider(ISwiftlyCore core, ILogger<MapConfi
             throw new InvalidDataException($"BonusPrefix in '{path}' is required when BonusCount is greater than zero.");
         if (value.MaxVelocity is < 1 or > 10000)
             throw new InvalidDataException($"MaxVelocity in '{path}' must be between 1 and 10000.");
+        if (value.CancelTriggers.Any(string.IsNullOrWhiteSpace))
+            throw new InvalidDataException($"CancelTriggers in '{path}' must not contain blank trigger names.");
     }
 }

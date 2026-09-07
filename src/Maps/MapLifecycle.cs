@@ -3,6 +3,7 @@ using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.Events;
 using SwiftlyS2.Shared.SchemaDefinitions;
 using SurfTimer.Storage;
+using SurfTimer.Configuration;
 using SwiftlyS2.Shared.Natives;
 
 namespace SurfTimer.Maps;
@@ -24,6 +25,7 @@ public sealed class MapLifecycle(
     ISwiftlyCore core,
     RecordRepository records,
     MapConfigurationProvider configurations,
+    SurfTimerOptions options,
     ILogger<MapLifecycle> logger)
 {
     private bool _started;
@@ -41,6 +43,8 @@ public sealed class MapLifecycle(
     public int CheckpointCount => Current?.Configuration.CheckpointCount ?? GetDetectedCheckpointCount();
     public int StageCount => Current?.Configuration.StageCount ?? 0;
     public int BonusCount => Current?.Configuration.BonusCount ?? 0;
+    public event Action<MapCompatibilityReport>? CompatibilityEvaluated;
+    public event Action? ConfigurationChanged;
 
     public void Start(bool hotReload)
     {
@@ -86,42 +90,52 @@ public sealed class MapLifecycle(
     {
         if (Current is null) return;
 
-        var designerName = gameEvent.Entity.DesignerName;
-        Current = designerName switch
-        {
-            "trigger_multiple" => Current with { MultipleTriggers = Current.MultipleTriggers + 1 },
-            "trigger_once" => Current with { OnceTriggers = Current.OnceTriggers + 1 },
-            "trigger_teleport" => Current with { TeleportTriggers = Current.TeleportTriggers + 1 },
-            _ => Current
-        };
-
-        if (designerName is "trigger_multiple" or "trigger_once" or "trigger_teleport")
-        {
-            _triggers.Add(new MapTriggerSnapshot(
-                gameEvent.Entity.Index,
-                designerName,
-                gameEvent.Entity.Identity?.Name ?? string.Empty));
-            if (Current is { } current && IsConfiguredTimerTrigger(_triggers[^1].TargetName, current.Configuration))
-                _ = records.TrackMapMetadataAsync(current.Name, current.WorkshopId, CheckpointCount, StageCount, BonusCount,
-                    current.Configuration.Tier, current.Configuration.Enabled);
-        }
+        if (RegisterTrigger(gameEvent.Entity) && Current is { } current &&
+            IsConfiguredTimerTrigger(gameEvent.Entity.Identity?.Name ?? string.Empty, current.Configuration))
+            _ = records.TrackMapMetadataAsync(current.Name, current.WorkshopId, CheckpointCount, StageCount, BonusCount,
+                current.Configuration.Tier, current.Configuration.Enabled);
     }
 
+    private bool RegisterTrigger(CEntityInstance entity)
+    {
+        var designerName = entity.DesignerName;
+        if (designerName is not ("trigger_multiple" or "trigger_once" or "trigger_teleport")) return false;
+        var snapshot = new MapTriggerSnapshot(entity.Index, designerName, entity.Identity?.Name ?? string.Empty);
+        var existing = _triggers.FindIndex(trigger => trigger.EntityIndex == entity.Index);
+        if (existing >= 0) _triggers[existing] = snapshot;
+        else _triggers.Add(snapshot);
+        if (Current is not null)
+            Current = Current with
+            {
+                MultipleTriggers = _triggers.Count(trigger => trigger.DesignerName == "trigger_multiple"),
+                OnceTriggers = _triggers.Count(trigger => trigger.DesignerName == "trigger_once"),
+                TeleportTriggers = _triggers.Count(trigger => trigger.DesignerName == "trigger_teleport")
+            };
+        return existing < 0;
+    }
     private void Load(string mapName)
     {
         _compatibilityTimer?.Cancel();
         _triggers.Clear();
         var loadedConfiguration = configurations.Load(mapName);
+        var workshopId = core.Engine.WorkshopId;
+        if (string.IsNullOrWhiteSpace(workshopId))
+            workshopId = options.MapVoting.Maps.FirstOrDefault(map =>
+                map.Name.Equals(mapName, StringComparison.OrdinalIgnoreCase))?.WorkshopId ?? string.Empty;
         Current = new MapSnapshot(
             mapName,
-            core.Engine.WorkshopId,
+            workshopId,
             ++_generation,
             DateTimeOffset.UtcNow,
-            Count("trigger_multiple"),
-            Count("trigger_once"),
-            Count("trigger_teleport"),
+            0,
+            0,
+            0,
             loadedConfiguration.Value,
             loadedConfiguration.Source);
+
+        foreach (var designerName in new[] { "trigger_multiple", "trigger_once", "trigger_teleport" })
+            foreach (var entity in core.EntitySystem.GetAllEntitiesByDesignerName<CEntityInstance>(designerName))
+                RegisterTrigger(entity);
 
         logger.LogInformation(
             "Map loaded: {MapName} (Workshop {WorkshopId}, generation {Generation}); triggers: multiple={Multiple}, once={Once}, teleport={Teleport}.",
@@ -137,6 +151,7 @@ public sealed class MapLifecycle(
     {
         if (Current is null || Current.Generation != generation) return;
         var report = Compatibility;
+        CompatibilityEvaluated?.Invoke(report);
         if (report.IsCompatible)
             logger.LogInformation("Map compatibility certified for {MapName}: {Summary}.", report.MapName, report.Summary);
         else
@@ -151,6 +166,7 @@ public sealed class MapLifecycle(
         if (Current is null) return;
         var loaded = configurations.Load(Current.Name);
         Current = Current with { Configuration = loaded.Value, ConfigurationSource = loaded.Source };
+        ConfigurationChanged?.Invoke();
         _ = records.TrackMapMetadataAsync(Current.Name, Current.WorkshopId, CheckpointCount, StageCount, BonusCount,
             Current.Configuration.Tier, Current.Configuration.Enabled);
         logger.LogInformation("Reloaded map configuration for {MapName}: tier={Tier}, enabled={Enabled}, validation={Validation}.",
@@ -166,6 +182,8 @@ public sealed class MapLifecycle(
 
     public bool IsStartTrigger(string? targetName) => targetName is not null && targetName == Current?.Configuration.StartTrigger;
     public bool IsEndTrigger(string? targetName) => targetName is not null && targetName == Current?.Configuration.EndTrigger;
+    public bool IsCancelTrigger(string? targetName) => targetName is not null &&
+        Current?.Configuration.CancelTriggers.Contains(targetName, StringComparer.Ordinal) == true;
 
     public bool TryParseStageStart(string? targetName, out int stage)
     {
@@ -192,6 +210,12 @@ public sealed class MapLifecycle(
     public bool TryGetBonusStartTransform(int bonus, out Vector position, out QAngle angles)
         => TryGetTriggerTransform(candidate =>
             TryParseBonusTrigger(candidate.TargetName, "start", out var found) && found == bonus,
+            out position, out angles);
+
+    public bool TryGetStageStartTransform(int stage, out Vector position, out QAngle angles)
+        => TryGetTriggerTransform(candidate => stage == 1
+            ? IsStartTrigger(candidate.TargetName)
+            : TryParseStageStart(candidate.TargetName, out var found) && found == stage,
             out position, out angles);
 
     public bool TryGetMainStartTransform(out Vector position, out QAngle angles)
@@ -281,3 +305,4 @@ public sealed class MapLifecycle(
     private int Count(string designerName) =>
         core.EntitySystem.GetAllEntitiesByDesignerName<CEntityInstance>(designerName).Count();
 }
+

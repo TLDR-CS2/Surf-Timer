@@ -103,12 +103,12 @@ app.MapGet("/api/maps",async(Database database,IMemoryCache cache,CancellationTo
     {
     entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(metadataCacheSeconds);entry.Size=1;
     await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand("""
-        SELECT m.name,m.tier,m.enabled,m.workshop_id,COUNT(r.id),COALESCE(SUM(r.completions),0),MIN(r.best_time_us)
+        SELECT m.name,m.tier,m.enabled,m.workshop_id,m.stage_count,COUNT(r.id),COALESCE(SUM(r.completions),0),MIN(r.best_time_us)
         FROM st_maps m LEFT JOIN st_records r ON r.map_id=m.id AND r.route_type='main' AND r.route_index=0 AND r.style=0 AND r.mode='surf'
-        WHERE m.enabled=1 AND m.name LIKE 'surf\\_%' GROUP BY m.id,m.name,m.tier,m.enabled,m.workshop_id ORDER BY m.tier,m.name
+        WHERE m.enabled=1 AND m.name LIKE 'surf\\_%' GROUP BY m.id,m.name,m.tier,m.enabled,m.workshop_id,m.stage_count ORDER BY m.tier,m.name
         """,connection);
     var maps=new List<object>(); await using var reader=await command.ExecuteReaderAsync(token);
-    while(await reader.ReadAsync(token)) maps.Add(new{name=reader.GetString(0),tier=reader.GetInt32(1),enabled=reader.GetBoolean(2),workshopId=reader.IsDBNull(3)?null:reader.GetString(3),players=reader.GetInt32(4),completions=reader.GetInt64(5),worldRecordUs=reader.IsDBNull(6)?(long?)null:reader.GetInt64(6)});
+    while(await reader.ReadAsync(token)) maps.Add(new{name=reader.GetString(0),tier=reader.GetInt32(1),enabled=reader.GetBoolean(2),workshopId=reader.IsDBNull(3)?null:reader.GetString(3),type=reader.GetInt32(4)>0?"staged":"linear",stageCount=reader.GetInt32(4),players=reader.GetInt32(5),completions=reader.GetInt64(6),worldRecordUs=reader.IsDBNull(7)?(long?)null:reader.GetInt64(7)});
     return maps;
     });return Results.Ok(payload);
 });
@@ -120,15 +120,14 @@ app.MapGet("/api/maps/{map}/routes",async(string map,Database database,IMemoryCa
     {
     entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(metadataCacheSeconds);entry.Size=1;
     await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand("""
-        SELECT route_type,route_index FROM (
-          SELECT 'main' AS route_type,0 AS route_index
-          UNION SELECT r.route_type,r.route_index FROM st_records r JOIN st_maps m ON m.id=r.map_id
-            WHERE m.name=@map AND r.style=0 AND r.mode='surf'
-          UNION SELECT 'stage',sr.stage FROM st_stage_records sr JOIN st_maps m ON m.id=sr.map_id WHERE m.name=@map
-        ) routes ORDER BY FIELD(route_type,'main','bonus','stage'),route_index
+        SELECT stage_count,bonus_count FROM st_maps WHERE name=@map AND enabled=1
         """,connection);command.Parameters.AddWithValue("@map",map);
-    var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);
-    while(await reader.ReadAsync(token))rows.Add(new{route=reader.GetString(0),index=reader.GetInt32(1)});
+    var rows=new List<object>{new{route="main",index=0}};await using var reader=await command.ExecuteReaderAsync(token);
+    if(await reader.ReadAsync(token))
+    {
+        for(var index=1;index<=reader.GetInt32(1);index++)rows.Add(new{route="bonus",index});
+        for(var index=1;index<=reader.GetInt32(0);index++)rows.Add(new{route="stage",index});
+    }
     return new{map,routes=rows};
     });return Results.Ok(payload);
 });
@@ -172,18 +171,18 @@ app.MapGet("/api/activity",async(int? limit,Database database,IMemoryCache cache
             ORDER BY activity.achieved_at DESC LIMIT @limit
             """,connection);command.Parameters.AddWithValue("@limit",take);
         var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);
-        while(await reader.ReadAsync(token))rows.Add(new{steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),map=reader.GetString(2),route=reader.GetString(3),index=reader.GetInt32(4),previousTimeUs=reader.IsDBNull(5)?(long?)null:reader.GetInt64(5),timeUs=reader.GetInt64(6),achievedAt=reader.GetDateTime(7),isWorldRecord=reader.GetBoolean(8)});
+        while(await reader.ReadAsync(token))rows.Add(new{steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),map=reader.GetString(2),route=reader.GetString(3),index=reader.GetInt32(4),previousTimeUs=reader.IsDBNull(5)?(long?)null:reader.GetInt64(5),timeUs=reader.GetInt64(6),achievedAt=DateTime.SpecifyKind(reader.GetDateTime(7),DateTimeKind.Utc),isWorldRecord=reader.GetBoolean(8)});
         return new{activity=rows};
     });return Results.Ok(payload);
 });
 
-app.MapGet("/api/rankings",async(int? limit,Database database,IMemoryCache cache,CancellationToken token)=>
+app.MapGet("/api/rankings",async(int? limit,int? page,int? pageSize,Database database,IMemoryCache cache,CancellationToken token)=>
 {
-    var take=Math.Clamp(limit??25,1,100);var payload=await cache.GetOrCreateAsync<object>($"points-rankings:{take}",async entry=>
+    var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??limit??25,1,100);var offset=((long)currentPage-1)*take;var payload=await cache.GetOrCreateAsync<object>($"points-rankings:{currentPage}:{take}",async entry=>
     {
         entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
-        await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand(PointsCte+" SELECT o.overall_rank,o.player_steam_id,p.last_name,o.points,o.completed_maps,o.group1,o.group2,o.group3,o.group4,o.group5,o.map_points,o.stage_points,o.bonus_points,o.title FROM overall o JOIN st_players p ON p.steam_id=o.player_steam_id ORDER BY o.points DESC,o.group1 DESC,o.group2 DESC,o.completed_maps DESC,p.last_name LIMIT @limit",connection);command.Parameters.AddWithValue("@limit",take);
-        var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);while(await reader.ReadAsync(token))rows.Add(ReadPointsRow(reader));return new{policy="Points",rankings=rows};
+        await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand(PointsCte+" SELECT o.overall_rank,o.player_steam_id,p.last_name,o.points,o.completed_maps,o.group1,o.group2,o.group3,o.group4,o.group5,o.map_points,o.stage_points,o.bonus_points,o.title,COUNT(*) OVER() FROM overall o JOIN st_players p ON p.steam_id=o.player_steam_id ORDER BY o.points DESC,o.group1 DESC,o.group2 DESC,o.completed_maps DESC,p.last_name,o.player_steam_id LIMIT @limit OFFSET @offset",connection);command.Parameters.AddWithValue("@limit",take);command.Parameters.AddWithValue("@offset",offset);
+        var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);long total=0;while(await reader.ReadAsync(token)){total=reader.GetInt64(14);rows.Add(ReadPointsRow(reader));}await reader.DisposeAsync();if(rows.Count==0)total=await CountUnpagedAsync(command,token);return new{policy="Points",rankings=rows,pagination=new{page=currentPage,pageSize=take,total,totalPages=(long)Math.Ceiling(total/(double)take)}};
     });return Results.Ok(payload);
 });
 
@@ -191,41 +190,43 @@ app.MapGet("/api/maps/{map}/leaderboard",async(string map,string? route,int? ind
 {
     route=route?.ToLowerInvariant()??"main"; if(route is not("main" or "bonus")) return Results.BadRequest(new{error="route must be main or bonus"});
     if(!await MapExistsAsync(map,database,cache,metadataCacheSeconds,token))return Results.NotFound(new{error="map not found"});
-    var routeIndex=route=="main"?0:Math.Clamp(index??1,1,99);var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??limit??10,1,100);var offset=(currentPage-1)*take;
+    var routeIndex=route=="main"?0:Math.Clamp(index??1,1,99);var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??limit??10,1,100);var offset=((long)currentPage-1)*take;
     var cacheKey=$"leaderboard:{map.ToLowerInvariant()}:{route}:{routeIndex}:{currentPage}:{take}";
     var payload=await cache.GetOrCreateAsync<object>(cacheKey,async entry=>
     {
     entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
     await using var connection=await database.OpenAsync(token); await using var command=new MySqlCommand("""
         SELECT r.player_steam_id,p.last_name,r.best_time_us,r.completions,r.pb_updated_at,
-               EXISTS(SELECT 1 FROM st_replays rp WHERE rp.record_id=r.id),COUNT(*) OVER()
+               EXISTS(SELECT 1 FROM st_replays rp WHERE rp.record_id=r.id),COUNT(*) OVER(),RANK() OVER(ORDER BY r.best_time_us)
         FROM st_records r JOIN st_maps m ON m.id=r.map_id JOIN st_players p ON p.steam_id=r.player_steam_id
         WHERE m.name=@map AND r.route_type=@route AND r.route_index=@index AND r.style=0 AND r.mode='surf'
         ORDER BY r.best_time_us,r.pb_updated_at,r.player_steam_id LIMIT @limit OFFSET @offset
         """,connection);
     command.Parameters.AddWithValue("@map",map);command.Parameters.AddWithValue("@route",route);command.Parameters.AddWithValue("@index",routeIndex);command.Parameters.AddWithValue("@limit",take);command.Parameters.AddWithValue("@offset",offset);
-    var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);var rank=offset;long total=0;
-    while(await reader.ReadAsync(token)){total=reader.GetInt64(6);var currentRank=++rank;rows.Add(new{rank=currentRank,group=route=="main"?GetTimeGroup(currentRank,total):(int?)null,steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),timeUs=reader.GetInt64(2),completions=reader.GetInt32(3),achievedAt=reader.GetDateTime(4),hasReplay=reader.GetBoolean(5)});}
+    var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);long total=0;
+    while(await reader.ReadAsync(token)){total=reader.GetInt64(6);var currentRank=reader.GetInt32(7);rows.Add(new{rank=currentRank,group=route=="main"?GetTimeGroup(currentRank,total):(int?)null,steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),timeUs=reader.GetInt64(2),completions=reader.GetInt32(3),achievedAt=DateTime.SpecifyKind(reader.GetDateTime(4),DateTimeKind.Utc),hasReplay=reader.GetBoolean(5)});}
+    await reader.DisposeAsync();if(rows.Count==0)total=await CountUnpagedAsync(command,token);
     return new{map,route,index=routeIndex,records=rows,pagination=new{page=currentPage,pageSize=take,total,totalPages=(long)Math.Ceiling(total/(double)take)}};
     });return Results.Ok(payload);
 });
 
 app.MapGet("/api/maps/{map}/stages/{stage:int}",async(string map,int stage,int? limit,int? page,int? pageSize,Database database,IMemoryCache cache,CancellationToken token)=>
 {
-    if(stage<1)return Results.BadRequest(new{error="stage must be positive"});var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??limit??10,1,100);var offset=(currentPage-1)*take;
+    if(stage<1)return Results.BadRequest(new{error="stage must be positive"});var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??limit??10,1,100);var offset=((long)currentPage-1)*take;
     if(!await MapExistsAsync(map,database,cache,metadataCacheSeconds,token))return Results.NotFound(new{error="map not found"});
     var payload=await cache.GetOrCreateAsync<object>($"stage:{map.ToLowerInvariant()}:{stage}:{currentPage}:{take}",async entry=>
     {
     entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
     await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand("""
         SELECT sr.player_steam_id,p.last_name,sr.best_time_us,sr.completions,sr.pb_updated_at,
-               EXISTS(SELECT 1 FROM st_stage_replays rp WHERE rp.stage_record_id=sr.id),COUNT(*) OVER()
+               EXISTS(SELECT 1 FROM st_stage_replays rp WHERE rp.stage_record_id=sr.id),COUNT(*) OVER(),RANK() OVER(ORDER BY sr.best_time_us)
         FROM st_stage_records sr JOIN st_maps m ON m.id=sr.map_id JOIN st_players p ON p.steam_id=sr.player_steam_id
         WHERE m.name=@map AND sr.stage=@stage ORDER BY sr.best_time_us,sr.pb_updated_at,sr.player_steam_id LIMIT @limit OFFSET @offset
         """,connection);
     command.Parameters.AddWithValue("@map",map);command.Parameters.AddWithValue("@stage",stage);command.Parameters.AddWithValue("@limit",take);command.Parameters.AddWithValue("@offset",offset);
-    var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);var rank=offset;long total=0;
-    while(await reader.ReadAsync(token)){total=reader.GetInt64(6);rows.Add(new{rank=++rank,steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),timeUs=reader.GetInt64(2),completions=reader.GetInt32(3),achievedAt=reader.GetDateTime(4),hasReplay=reader.GetBoolean(5)});}
+    var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);long total=0;
+    while(await reader.ReadAsync(token)){total=reader.GetInt64(6);rows.Add(new{rank=reader.GetInt32(7),steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),timeUs=reader.GetInt64(2),completions=reader.GetInt32(3),achievedAt=DateTime.SpecifyKind(reader.GetDateTime(4),DateTimeKind.Utc),hasReplay=reader.GetBoolean(5)});}
+    await reader.DisposeAsync();if(rows.Count==0)total=await CountUnpagedAsync(command,token);
     return new{map,stage,records=rows,pagination=new{page=currentPage,pageSize=take,total,totalPages=(long)Math.Ceiling(total/(double)take)}};
     });return Results.Ok(payload);
 });
@@ -235,7 +236,7 @@ app.MapGet("/api/players/search",async(string? q,Database database,CancellationT
     q=q?.Trim();if(string.IsNullOrWhiteSpace(q)||q.Length<2)return Results.BadRequest(new{error="query must contain at least two characters"});
     await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand("SELECT steam_id,last_name,last_seen_at FROM st_players WHERE steam_id=@q OR LOCATE(LOWER(@q),LOWER(last_name))>0 ORDER BY (LOWER(last_name)=LOWER(@q)) DESC,last_seen_at DESC LIMIT 10",connection);
     command.Parameters.AddWithValue("@q",q);var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);
-    while(await reader.ReadAsync(token))rows.Add(new{steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),lastSeen=reader.GetDateTime(2)});
+    while(await reader.ReadAsync(token))rows.Add(new{steamId=reader.GetUInt64(0).ToString(),playerName=reader.GetString(1),lastSeen=DateTime.SpecifyKind(reader.GetDateTime(2),DateTimeKind.Utc)});
     return Results.Ok(rows);
 });
 
@@ -251,7 +252,7 @@ app.MapGet("/api/players/{steamId}",async(string steamId,Database database,Cance
         GROUP BY p.steam_id,p.last_name,p.first_seen_at,p.last_seen_at,p.total_connections,s.tracked_time_us,s.tracked_completions
         """,connection);command.Parameters.AddWithValue("@steam",id);
     await using var reader=await command.ExecuteReaderAsync(token);if(!await reader.ReadAsync(token))return Results.NotFound(new{error="player not found"});
-    return Results.Ok(new{steamId=id.ToString(),playerName=reader.GetString(0),firstSeen=reader.GetDateTime(1),lastSeen=reader.GetDateTime(2),connections=reader.GetUInt32(3),completions=reader.GetInt64(4),uniqueMaps=reader.GetInt32(5),mainRecords=reader.IsDBNull(6)?0:reader.GetInt32(6),bonusRecords=reader.IsDBNull(7)?0:reader.GetInt32(7),trackedTimeUs=reader.GetInt64(8),trackedCompletions=reader.GetInt64(9)});
+    return Results.Ok(new{steamId=id.ToString(),playerName=reader.GetString(0),firstSeen=DateTime.SpecifyKind(reader.GetDateTime(1),DateTimeKind.Utc),lastSeen=DateTime.SpecifyKind(reader.GetDateTime(2),DateTimeKind.Utc),connections=reader.GetUInt32(3),completions=reader.GetInt64(4),uniqueMaps=reader.GetInt32(5),mainRecords=reader.IsDBNull(6)?0:reader.GetInt32(6),bonusRecords=reader.IsDBNull(7)?0:reader.GetInt32(7),trackedTimeUs=reader.GetInt64(8),trackedCompletions=reader.GetInt64(9)});
 });
 
 app.MapGet("/api/players/{steamId}/stats",async(string steamId,Database database,IMemoryCache cache,CancellationToken token)=>
@@ -285,13 +286,13 @@ app.MapGet("/api/players/{steamId}/points",async(string steamId,Database databas
         entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
         await using var connection=await database.OpenAsync(token);await using var command=new MySqlCommand(PointsCte+" SELECT o.overall_rank,o.player_steam_id,p.last_name,o.points,o.completed_maps,o.group1,o.group2,o.group3,o.group4,o.group5,o.map_points,o.stage_points,o.bonus_points,o.title FROM overall o JOIN st_players p ON p.steam_id=o.player_steam_id WHERE o.player_steam_id=@steam",connection);command.Parameters.AddWithValue("@steam",id);
         await using var reader=await command.ExecuteReaderAsync(token);return await reader.ReadAsync(token)?ReadPointsRow(reader):null;
-    });return payload is null?Results.NotFound(new{error="player has no Points yet"}):Results.Ok(new{policy="Points",ranking=payload});
+    });return Results.Ok(new{policy="Points",ranking=payload});
 });
 
 app.MapGet("/api/players/{steamId}/history",async(string steamId,string? map,string? route,int? index,int? page,int? pageSize,Database database,IMemoryCache cache,CancellationToken token)=>
 {
     if(!ulong.TryParse(steamId,out var id))return Results.BadRequest(new{error="invalid SteamID64"});route=route?.ToLowerInvariant();if(route is not null and not("main" or "bonus" or "stage"))return Results.BadRequest(new{error="history route must be main, bonus, or stage"});
-    var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??10,1,100);var offset=(currentPage-1)*take;var routeIndex=index??(route=="main"?0:1);
+    var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??10,1,100);var offset=((long)currentPage-1)*take;var routeIndex=index??(route=="main"?0:1);
     var key=$"history:{id}:{map?.ToLowerInvariant()}:{route}:{routeIndex}:{currentPage}:{take}";var payload=await cache.GetOrCreateAsync<object>(key,async entry=>
     {
         entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
@@ -308,7 +309,8 @@ app.MapGet("/api/players/{steamId}/history",async(string steamId,string? map,str
             ORDER BY history.achieved_at DESC,history.id DESC LIMIT @limit OFFSET @offset
             """,connection);command.Parameters.AddWithValue("@steam",id);command.Parameters.AddWithValue("@map",string.IsNullOrWhiteSpace(map)?DBNull.Value:map);command.Parameters.AddWithValue("@route",string.IsNullOrWhiteSpace(route)?DBNull.Value:route);command.Parameters.AddWithValue("@index",routeIndex);command.Parameters.AddWithValue("@limit",take);command.Parameters.AddWithValue("@offset",offset);
         var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);long total=0;
-        while(await reader.ReadAsync(token)){total=reader.GetInt64(6);var previous=reader.IsDBNull(3)?(long?)null:reader.GetInt64(3);var current=reader.GetInt64(4);rows.Add(new{map=reader.GetString(0),route=reader.GetString(1),index=reader.GetInt32(2),previousTimeUs=previous,timeUs=current,improvementUs=previous-current,achievedAt=reader.GetDateTime(5)});}
+        while(await reader.ReadAsync(token)){total=reader.GetInt64(6);var previous=reader.IsDBNull(3)?(long?)null:reader.GetInt64(3);var current=reader.GetInt64(4);rows.Add(new{map=reader.GetString(0),route=reader.GetString(1),index=reader.GetInt32(2),previousTimeUs=previous,timeUs=current,improvementUs=previous-current,achievedAt=DateTime.SpecifyKind(reader.GetDateTime(5),DateTimeKind.Utc)});}
+        await reader.DisposeAsync();if(rows.Count==0)total=await CountUnpagedAsync(command,token);
         return new{steamId=id.ToString(),history=rows,pagination=new{page=currentPage,pageSize=take,total,totalPages=(long)Math.Ceiling(total/(double)take)}};
     });return Results.Ok(payload);
 });
@@ -318,7 +320,7 @@ app.MapGet("/api/players/{steamId}/records",async(string steamId,string? map,str
     if(!ulong.TryParse(steamId,out var id))return Results.BadRequest(new{error="invalid SteamID64"});
     route=route?.ToLowerInvariant();if(route is not null and not("main" or "bonus" or "stage"))return Results.BadRequest(new{error="route must be main, bonus, or stage"});sort=sort?.ToLowerInvariant()??"recent";
     var orderBy=sort switch{"recent"=>"pb_updated_at DESC,map_name,route_type,route_index","rank"=>"position,map_name,route_type,route_index","time"=>"best_time_us,map_name,route_type,route_index","map"=>"map_name,route_type,route_index","name"=>"map_name,route_type,route_index",_=>null};if(orderBy is null)return Results.BadRequest(new{error="sort must be recent, rank, time, or map"});
-    var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??25,1,100);var offset=(currentPage-1)*take;
+    var currentPage=Math.Max(page??1,1);var take=Math.Clamp(pageSize??25,1,100);var offset=((long)currentPage-1)*take;
     var payload=await cache.GetOrCreateAsync<object>($"player-records:{id}:{map?.ToLowerInvariant()}:{route}:{sort}:{currentPage}:{take}",async entry=>
     {
     entry.AbsoluteExpirationRelativeToNow=TimeSpan.FromSeconds(recordCacheSeconds);entry.Size=1;
@@ -340,13 +342,21 @@ app.MapGet("/api/players/{steamId}/records",async(string steamId,string? map,str
         ORDER BY {{orderBy}} LIMIT @limit OFFSET @offset
         """,connection);command.Parameters.AddWithValue("@steam",id);command.Parameters.AddWithValue("@map",string.IsNullOrWhiteSpace(map)?DBNull.Value:map);command.Parameters.AddWithValue("@route",string.IsNullOrWhiteSpace(route)?DBNull.Value:route);command.Parameters.AddWithValue("@limit",take);command.Parameters.AddWithValue("@offset",offset);
     var rows=new List<object>();await using var reader=await command.ExecuteReaderAsync(token);long total=0;
-    while(await reader.ReadAsync(token)){total=reader.GetInt64(9);var recordRoute=reader.GetString(2);var recordRank=reader.GetInt32(7);rows.Add(new{map=reader.GetString(0),tier=reader.GetInt32(1),route=recordRoute,index=reader.GetInt32(3),timeUs=reader.GetInt64(4),completions=reader.GetInt32(5),achievedAt=reader.GetDateTime(6),rank=recordRank,group=recordRoute=="main"?GetTimeGroup(recordRank,reader.GetInt64(8)):null});}
+    while(await reader.ReadAsync(token)){total=reader.GetInt64(9);var recordRoute=reader.GetString(2);var recordRank=reader.GetInt32(7);rows.Add(new{map=reader.GetString(0),tier=reader.GetInt32(1),route=recordRoute,index=reader.GetInt32(3),timeUs=reader.GetInt64(4),completions=reader.GetInt32(5),achievedAt=DateTime.SpecifyKind(reader.GetDateTime(6),DateTimeKind.Utc),rank=recordRank,group=recordRoute=="main"?GetTimeGroup(recordRank,reader.GetInt64(8)):null});}
+    await reader.DisposeAsync();if(rows.Count==0)total=await CountUnpagedAsync(command,token);
     return new{steamId=id.ToString(),records=rows,pagination=new{page=currentPage,pageSize=take,total,totalPages=(long)Math.Ceiling(total/(double)take)}};
     });return Results.Ok(payload);
 });
 
 app.MapFallbackToFile("index.html");
 app.Run();
+
+static async Task<long> CountUnpagedAsync(MySqlCommand command,CancellationToken token)
+{
+    var limit=command.CommandText.LastIndexOf(" LIMIT @limit",StringComparison.Ordinal);
+    command.CommandText="SELECT COUNT(*) FROM ("+command.CommandText[..limit]+") unpaged";
+    return Convert.ToInt64(await command.ExecuteScalarAsync(token));
+}
 
 static int GetInt(string name,int fallback,int minimum,int maximum)=>int.TryParse(Environment.GetEnvironmentVariable(name),out var value)?Math.Clamp(value,minimum,maximum):fallback;
 static uint GetUInt(string name,uint fallback)=>uint.TryParse(Environment.GetEnvironmentVariable(name),out var value)?value:fallback;

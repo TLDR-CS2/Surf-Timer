@@ -24,9 +24,12 @@ public sealed class PracticeCommands(
         Register("tele", context => OnTeleport(context, 0), "Teleports to your current saved location.");
         Register("teleprev", context => OnTeleport(context, -1), "Selects and teleports to the previous saved location.");
         Register("telenext", context => OnTeleport(context, 1), "Selects and teleports to the next saved location.");
+        Register("locs", OnLocations, "Lists saved practice locations.");
+        Register("delloc", OnDelete, "Deletes a location: !delloc [name or number].");
+        Register("clearlocs", OnClear, "Clears saved locations, keeping practice active.");
         Register("noclip", OnNoclip, "Toggles practice noclip.");
         Register("ncspeed", OnNoclipSpeed, "Sets practice noclip speed: !ncspeed <500-2000>.");
-        foreach (var name in new[] { "saveloc", "tele", "teleprev", "telenext", "noclip", "ncspeed" })
+        foreach (var name in new[] { "saveloc", "tele", "teleprev", "telenext", "noclip", "ncspeed", "locs", "delloc", "clearlocs" })
             core.Command.RegisterCommandAlias("sw_" + name, "css_" + name, registerRaw: true);
         core.Event.OnTick += OnTick;
     }
@@ -34,7 +37,7 @@ public sealed class PracticeCommands(
     public void Unregister()
     {
         core.Event.OnTick -= OnTick;
-        foreach (var name in new[] { "css_saveloc", "css_tele", "css_teleprev", "css_telenext", "css_noclip", "css_ncspeed" })
+        foreach (var name in new[] { "css_saveloc", "css_tele", "css_teleprev", "css_telenext", "css_noclip", "css_ncspeed", "css_locs", "css_delloc", "css_clearlocs" })
             core.Command.UnregisterCommand(name);
         foreach (var registration in _registrations) core.Command.UnregisterCommand(registration);
         _registrations.Clear();
@@ -52,18 +55,23 @@ public sealed class PracticeCommands(
     private void OnSave(ICommandContext context)
     {
         if (!TryPlayer(context, out var session, out var pawn) || pawn.AbsOrigin is not { } origin) return;
+        var name = context.Args.Length == 0 ? null : string.Join(" ", context.Args).Trim();
+        if (name is not null && (name.Length is < 1 or > 32 || name.Any(char.IsControl) || int.TryParse(name, out _)))
+        { context.Reply("[SurfTimer] Use !saveloc [name], with a nonnumeric name of 1-32 characters."); return; }
         var checkpoint = session.Run.LastCheckpoint;
         StopCompetitive(session, RunInvalidationReason.PracticeSave);
         var index = session.Practice.Save(new SavedLocation(new Vector(origin), new QAngle(pawn.EyeAngles),
-            new Vector(pawn.AbsVelocity), checkpoint));
-        context.Reply($"[SurfTimer] Practice location #{index + 1} saved.");
+            new Vector(pawn.AbsVelocity), checkpoint, name));
+        context.Reply($"[SurfTimer] Practice location #{index + 1}{(name is null ? "" : $" ({name})")} saved.");
     }
 
     private void OnTeleport(ICommandContext context, int direction)
     {
         if (context.Sender is null || !TrySession(context, out var session)) return;
-        var location = direction == 0 ? session.Practice.Current() : session.Practice.Move(direction);
-        if (location is null) { context.Reply("[SurfTimer] No practice location saved. Use !saveloc first."); return; }
+        var location = direction == 0
+            ? context.Args.Length == 0 ? session.Practice.Current() : session.Practice.Select(string.Join(" ", context.Args))
+            : session.Practice.Move(direction);
+        if (location is null) { context.Reply("[SurfTimer] No matching practice location. Use !saveloc [name] or !locs."); return; }
         StopCompetitive(session, RunInvalidationReason.PracticeTeleport);
         session.Practice.Activate();
         var playerId = context.Sender.PlayerID;
@@ -75,6 +83,29 @@ public sealed class PracticeCommands(
         }
         else Teleport(playerId, sessionId, location);
         context.Reply($"[SurfTimer] Practice location #{session.Practice.CurrentIndex + 1}/{session.Practice.Locations.Count}.");
+    }
+
+    private void OnLocations(ICommandContext context)
+    {
+        if (!TrySession(context, out var session)) return;
+        var locations = session.Practice.Locations;
+        if (locations.Count == 0) { context.Reply("[SurfTimer] No saved practice locations."); return; }
+        foreach (var batch in locations.Select((location, index) => $"#{index + 1}: {location.Name ?? "unnamed"}").Chunk(5))
+            context.Reply("[SurfTimer] " + string.Join(" | ", batch));
+    }
+
+    private void OnDelete(ICommandContext context)
+    {
+        if (!TrySession(context, out var session)) return;
+        context.Reply(session.Practice.Delete(context.Args.Length == 0 ? null : string.Join(" ", context.Args))
+            ? "[SurfTimer] Practice location deleted." : "[SurfTimer] Location not found. Use !locs.");
+    }
+
+    private void OnClear(ICommandContext context)
+    {
+        if (!TrySession(context, out var session)) return;
+        session.Practice.ClearLocations();
+        context.Reply("[SurfTimer] Saved practice locations cleared.");
     }
 
     private void OnNoclip(ICommandContext context)

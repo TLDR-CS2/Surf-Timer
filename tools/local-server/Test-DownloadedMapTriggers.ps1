@@ -1,9 +1,6 @@
 [CmdletBinding()]
 param(
-    [string[]]$Maps = @(
-        "surf_aquaflow", "surf_newbie", "surf_zeitgeist", "surf_jive",
-        "surf_cannonball", "surf_sippysip", "surf_lt_omnific"
-    )
+    [string[]]$Maps = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -12,6 +9,11 @@ $mapConfigs = Join-Path $workspace "resources\configs\maps"
 $workshopRoot = "C:\CS2Server\server\game\bin\win64\steamapps\workshop\content\730"
 $cfgRoot = Join-Path $PSScriptRoot "maps"
 $failures = [System.Collections.Generic.List[string]]::new()
+
+if ($Maps.Count -eq 0) {
+    $Maps = @(Get-ChildItem -File -LiteralPath $mapConfigs -Filter "surf_*.json" |
+        Sort-Object BaseName | ForEach-Object BaseName)
+}
 
 foreach ($map in $Maps) {
     $config = Get-Content -Raw -LiteralPath (Join-Path $mapConfigs ($map + ".json")) | ConvertFrom-Json

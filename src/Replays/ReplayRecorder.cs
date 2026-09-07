@@ -10,6 +10,7 @@ public sealed class ReplayRecorder(
     ISwiftlyCore core,
     SurfPlayerManager players,
     BotControllerBridge botController,
+    SurfTimer.Configuration.SurfTimerOptions options,
     ILogger<ReplayRecorder> logger)
 {
     public const int SampleRateHz = 64;
@@ -67,7 +68,7 @@ public sealed class ReplayRecorder(
             logger.LogWarning("Native replay recording returned no ticks for player {PlayerId}; using legacy frames.", slot);
         }
         if (frames.Count == 0) return null;
-        return new ReplayCapture(SampleRateHz, frames);
+        return new ReplayCapture(SampleRateHz, frames, RecordedDurationMicroseconds: durationMicroseconds);
     }
 
     private void OnTick()
@@ -78,14 +79,23 @@ public sealed class ReplayRecorder(
         foreach (var sessionId in _frames.Keys.Concat(_nativeSlots.Keys).Distinct().ToArray())
         {
             var session = players.Sessions.FirstOrDefault(candidate => candidate.SessionId == sessionId);
-            if (session is null || (session.Run.State != RunState.Running && session.BonusRun.State != RunState.Running))
+            if (session is null || (session.Run.State != RunState.Running && session.BonusRun.State != RunState.Running && session.StageRun.State != RunState.Running))
                 Cancel(sessionId);
         }
 
         foreach (var session in players.Sessions)
         {
-            var run = session.ActiveBonus > 0 ? session.BonusRun : session.Run;
+            var run = session.ActiveStageAttempt > 0 ? session.StageRun : session.ActiveBonus > 0 ? session.BonusRun : session.Run;
             if (run.State != RunState.Running || !_frames.TryGetValue(session.SessionId, out var frames)) continue;
+            if (frames.Count >= (long)options.MaximumReplayMinutes * 60 * SampleRateHz ||
+                run.ElapsedAt(new EngineTimestamp(core.Engine.GlobalVars.CurrentTime)) >= (long)options.MaximumReplayMinutes * 60 * 1_000_000)
+            {
+                Cancel(session.SessionId);
+                core.PlayerManager.GetPlayer(session.PlayerId)?.SendChat(
+                    $"[SurfTimer] Replay capture limit ({options.MaximumReplayMinutes} minutes) reached. Timing continues without a replay.");
+                logger.LogWarning("Replay capture limit reached for session {SessionId}.", session.SessionId);
+                continue;
+            }
             var player = core.PlayerManager.GetPlayer(session.PlayerId);
             var pawn = player?.PlayerPawn;
             if (player is null || pawn is null || !pawn.IsValid || pawn.AbsOrigin is not { } origin) continue;

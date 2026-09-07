@@ -5,6 +5,7 @@ using SwiftlyS2.Shared.GameEventDefinitions;
 using SwiftlyS2.Shared.Misc;
 using SwiftlyS2.Shared.Players;
 using SurfTimer.Storage;
+using SurfTimer.Titles;
 
 namespace SurfTimer.Players;
 
@@ -12,11 +13,14 @@ public sealed class SurfPlayerManager(
     ISwiftlyCore core,
     RecordRepository records,
     PlayerPreferenceRepository preferences,
+    TitleManager titles,
     ILogger<SurfPlayerManager> logger)
 {
     private readonly Dictionary<int, SurfPlayerSession> _sessions = [];
     private readonly List<Guid> _gameEventHooks = [];
     private bool _started;
+
+    public event Action<SurfPlayerSession>? Disconnected;
 
     public int Count => _sessions.Count;
     public IReadOnlyCollection<SurfPlayerSession> Sessions => _sessions.Values;
@@ -37,7 +41,10 @@ public sealed class SurfPlayerManager(
         {
             foreach (var player in core.PlayerManager.GetAllPlayers())
             {
-                AddOrRefresh(player);
+                var session = AddOrRefresh(player);
+                EnsurePreferencesLoaded(session);
+                if (session.IsAuthorized && !session.IsBot && session.SteamId != 0)
+                    _ = titles.ApplyAsync(session.PlayerId, session.SessionId, session.SteamId);
             }
         }
 
@@ -72,26 +79,37 @@ public sealed class SurfPlayerManager(
         var session = AddOrRefresh(player);
         session.MarkAuthorized(player.SteamID);
         _ = records.UpsertPlayerConnectionAsync(player.SteamID, player.Name);
-        _ = LoadPreferencesAsync(session.PlayerId, session.SessionId, player.SteamID);
+        EnsurePreferencesLoaded(session);
+        _ = titles.ApplyAsync(session.PlayerId, session.SessionId, player.SteamID);
         logger.LogInformation("Player authorized: {Name} ({SteamId}, player {PlayerId}).",
             player.Name, player.SteamID, player.PlayerID);
     }
 
-    private async Task LoadPreferencesAsync(int playerId, ulong sessionId, ulong steamId)
+    public void EnsurePreferencesLoaded(SurfPlayerSession session)
+    {
+        if (!_started || !session.TryBeginPreferenceLoad()) return;
+        _ = LoadPreferencesAsync(session, session.SteamId, session.PreferenceRevision);
+    }
+
+    private async Task LoadPreferencesAsync(SurfPlayerSession expected, ulong steamId, long revision)
     {
         try
         {
             var loaded = await preferences.LoadAsync(steamId).ConfigureAwait(false);
             core.Scheduler.NextTick(() =>
             {
-                var session = Get(playerId);
-                if (session is not null && session.SessionId == sessionId && session.SteamId == steamId)
-                    session.SetPreferences(loaded);
+                var session = Get(expected.PlayerId);
+                if (_started && session is not null && ReferenceEquals(session, expected) && session.SteamId == steamId)
+                    session.TryLoadPreferences(loaded, revision);
             });
         }
         catch (Exception exception)
         {
             logger.LogError(exception, "Failed to load preferences for {SteamId}.", steamId);
+            core.Scheduler.NextTick(() =>
+            {
+                if (_started && ReferenceEquals(Get(expected.PlayerId), expected)) expected.PreferenceLoadFailed();
+            });
         }
     }
 
@@ -99,6 +117,7 @@ public sealed class SurfPlayerManager(
     {
         if (_sessions.Remove(gameEvent.PlayerId, out var session))
         {
+            Disconnected?.Invoke(session);
             logger.LogInformation("Player disconnected: {Name} (player {PlayerId}, reason {Reason}).",
                 session.Name, session.PlayerId, gameEvent.Reason);
         }
@@ -140,3 +159,4 @@ public sealed class SurfPlayerManager(
         return session;
     }
 }
+

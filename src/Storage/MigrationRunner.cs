@@ -55,6 +55,13 @@ public sealed class MigrationRunner(
                 .ConfigureAwait(false);
             await ApplyFileAsync(connection, 13, "013_map_route_counts.sql", "authoritative map stage and bonus counts", cancellationToken)
                 .ConfigureAwait(false);
+            await ApplyFileAsync(connection, 14, "014_player_titles.sql", "VIP title entitlement and display preferences", cancellationToken)
+                .ConfigureAwait(false);
+            await ApplyFileAsync(connection, 15, "015_title_chat_colors.sql", "expanded tag and name colour preferences", cancellationToken).ConfigureAwait(false);
+            await ApplyFileAsync(connection, 16, "016_run_receipts.sql", "idempotent completed runs and catalog authority", cancellationToken).ConfigureAwait(false);
+            await ApplyFileAsync(connection, 17, "017_record_archives.sql", "reversible record moderation evidence", cancellationToken).ConfigureAwait(false);
+            await ApplyFileAsync(connection, 18, "018_ruleset_provenance.sql", "run ruleset provenance", cancellationToken).ConfigureAwait(false);
+            await ApplyFileAsync(connection, 19, "019_competitive_rulesets.sql", "approved competitive map rulesets", cancellationToken).ConfigureAwait(false);
         }
         finally
         {
@@ -65,12 +72,27 @@ public sealed class MigrationRunner(
 
     private async Task ApplyFileAsync(DbConnection connection, int version, string fileName, string name, CancellationToken token)
     {
-        if (await IsAppliedAsync(connection, version, token).ConfigureAwait(false)) return;
         var path = Path.Combine(core.PluginPath, "resources", "migrations", "mysql", fileName);
         if (!File.Exists(path)) throw new FileNotFoundException("SurfTimer migration resource was not deployed.", path);
         var sql = await File.ReadAllTextAsync(path, token).ConfigureAwait(false);
+        await ExecuteAsync(connection, "CREATE TABLE IF NOT EXISTS st_migration_checksums(version INT NOT NULL PRIMARY KEY,checksum CHAR(64) NOT NULL)", token).ConfigureAwait(false);
+        await using (var checksum = connection.CreateCommand())
+        {
+            checksum.CommandText = "SELECT checksum FROM st_migration_checksums WHERE version=@version";
+            checksum.AddParameter("@version", version);
+            var existing = await checksum.ExecuteScalarAsync(token).ConfigureAwait(false);
+            if (existing is not null && Convert.ToString(existing) != MigrationRecovery.Checksum(sql))
+                throw new InvalidDataException($"Migration {version} changed after deployment.");
+            checksum.CommandText = "INSERT IGNORE INTO st_migration_checksums(version,checksum) VALUES(@version,@checksum)";
+            checksum.AddParameter("@checksum", MigrationRecovery.Checksum(sql));
+            await checksum.ExecuteNonQueryAsync(token).ConfigureAwait(false);
+        }
+        if (await IsAppliedAsync(connection, version, token).ConfigureAwait(false)) return;
         foreach (var statement in sql.Split(';', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
-            await ExecuteAsync(connection, statement, token).ConfigureAwait(false);
+        {
+            var resumable = await MigrationRecovery.RemoveExistingAddedColumnsAsync(connection, statement, token).ConfigureAwait(false);
+            if (resumable is not null) await ExecuteAsync(connection, resumable, token).ConfigureAwait(false);
+        }
         await using var command = connection.CreateCommand();
         command.CommandText = "INSERT INTO st_schema_migrations (version,name,applied_at) VALUES (@version,@name,UTC_TIMESTAMP(6))";
         command.AddParameter("@version", version); command.AddParameter("@name", name);
@@ -110,3 +132,6 @@ public sealed class MigrationRunner(
         await command.ExecuteNonQueryAsync(cancellationToken).ConfigureAwait(false);
     }
 }
+
+
+

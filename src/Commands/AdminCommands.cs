@@ -32,7 +32,9 @@ public sealed class AdminCommands(
         Register("stmapcheck", OnMapCheck, "Checks the loaded map's mapper triggers.");
         Register("stcatalogcheck", OnCatalogCheck, "Checks every map catalog configuration.");
         Register("stplayer", OnPlayer, "Inspects a global player: !stplayer <name|SteamID64>.");
-        Register("stdeletepb", OnDeletePb, "Deletes a PB: !stdeletepb <player> confirm.");
+        Register("stinvalidate", OnInvalidate, "Invalidates a route PB: !stinvalidate <SteamID64> <main|stage|bonus> <index> <reason>.");
+        Register("strestore", OnRestore, "Restores archived record evidence: !strestore <archive ID>.");
+        Register("stdeletepb", OnDeletePb, "Invalidates a PB and preserves evidence: !stdeletepb <player> confirm.");
         Register("streplayinfo", OnReplayInfo, "Inspects a replay: !streplayinfo <1-10>.");
         Register("stdeletereplay", OnDeleteReplay, "Deletes only a replay: !stdeletereplay <1-10> confirm.");
         Register("ststagereplayinfo", OnStageReplayInfo, "Inspects a stage replay: !ststagereplayinfo <stage> <rank>.");
@@ -41,13 +43,13 @@ public sealed class AdminCommands(
         Register("stdeletebonusreplay", OnDeleteBonusReplay, "Deletes a bonus replay: !stdeletebonusreplay <bonus> <rank> confirm.");
         Register("stvalidate", OnValidate, "Shows your current run-validation state.");
         Register("strecordcheck", OnRecordCheck, "Inspects stored run telemetry: !strecordcheck <1-10>.");
-        foreach (var name in new[] { "stadmin", "stmapreload", "stsettier", "stmapenable", "stmapcheck", "stcatalogcheck", "stplayer", "stdeletepb", "streplayinfo", "stdeletereplay", "ststagereplayinfo", "stdeletestagereplay", "stbonusreplayinfo", "stdeletebonusreplay", "stvalidate", "strecordcheck" })
+        foreach (var name in new[] { "stinvalidate", "strestore", "stadmin", "stmapreload", "stsettier", "stmapenable", "stmapcheck", "stcatalogcheck", "stplayer", "stdeletepb", "streplayinfo", "stdeletereplay", "ststagereplayinfo", "stdeletestagereplay", "stbonusreplayinfo", "stdeletebonusreplay", "stvalidate", "strecordcheck" })
             core.Command.RegisterCommandAlias("sw_" + name, "css_" + name, registerRaw: true);
     }
 
     public void Unregister()
     {
-        foreach (var name in new[] { "css_stadmin", "css_stmapreload", "css_stsettier", "css_stmapenable", "css_stmapcheck", "css_stcatalogcheck", "css_stplayer", "css_stdeletepb", "css_streplayinfo", "css_stdeletereplay", "css_ststagereplayinfo", "css_stdeletestagereplay", "css_stbonusreplayinfo", "css_stdeletebonusreplay", "css_stvalidate", "css_strecordcheck" })
+        foreach (var name in new[] { "css_stinvalidate", "css_strestore", "css_stadmin", "css_stmapreload", "css_stsettier", "css_stmapenable", "css_stmapcheck", "css_stcatalogcheck", "css_stplayer", "css_stdeletepb", "css_streplayinfo", "css_stdeletereplay", "css_ststagereplayinfo", "css_stdeletestagereplay", "css_stbonusreplayinfo", "css_stdeletebonusreplay", "css_stvalidate", "css_strecordcheck" })
             core.Command.UnregisterCommand(name);
         foreach (var registration in _registrations) core.Command.UnregisterCommand(registration);
         _registrations.Clear();
@@ -61,6 +63,8 @@ public sealed class AdminCommands(
     {
         var map = maps.Current;
         context.Reply($"[SurfTimer Admin] server={options.ServerId} database={records.Status} failures={records.ConsecutiveFailures}");
+        context.Reply($"[SurfTimer Admin] {records.PendingQueueStatus()}");
+        if (map is not null) context.Reply($"[SurfTimer Admin] ruleset={RulesetFingerprint.Capture(core, maps)} stageRecordsCertified={map.Configuration.IndependentStageRecordsCertified && maps.CheckpointCount == 0}");
         context.Reply(map is null
             ? "[SurfTimer Admin] No active map."
             : $"[SurfTimer Admin] map={map.Name} tier={map.Configuration.Tier} enabled={map.Configuration.Enabled} checkpoints={maps.CheckpointCount} validation={maps.Validation.Summary}");
@@ -193,12 +197,60 @@ public sealed class AdminCommands(
         catch (Exception exception) { Fail(playerId, sessionId, exception, "inspect player"); }
     }
 
+    private void OnInvalidate(ICommandContext context)
+    {
+        if (context.Sender is null) { context.Reply("[SurfTimer Admin] This command requires a player caller."); return; }
+        if (context.Args.Length < 4 || !ulong.TryParse(context.Args[0], out var steam) ||
+            context.Args[1] is not ("main" or "stage" or "bonus") || !int.TryParse(context.Args[2], out var index) ||
+            (context.Args[1] == "main" ? index != 0 : index < 1))
+        { context.Reply("[SurfTimer Admin] !stinvalidate <SteamID64> <main|stage|bonus> <index: main=0> <reason>"); return; }
+        var map = maps.Current?.Name;
+        if (map is null) return;
+        _ = InvalidateAsync(context.Sender.PlayerID, context.Sender.SessionId, context.Sender.SteamID,
+            steam, map, context.Args[1], index, string.Join(' ', context.Args[3..]));
+    }
+
+    private async Task InvalidateAsync(int playerId, ulong sessionId, ulong actor, ulong steam, string map, string route, int index, string reason)
+    {
+        try
+        {
+            var archive = await records.InvalidateRecordAsync(steam, map, route, index, actor, reason).ConfigureAwait(false);
+            if (archive is not null) playback.InvalidateSelection();
+            Reply(playerId, sessionId, archive is null ? "[SurfTimer Admin] No matching active record."
+                : $"[SurfTimer Admin] Record invalidated; replay and evidence preserved. Restore with !strestore {archive:N}.");
+        }
+        catch (Exception exception) { Fail(playerId, sessionId, exception, "invalidate record"); }
+    }
+
+    private void OnRestore(ICommandContext context)
+    {
+        if (context.Sender is null) { context.Reply("[SurfTimer Admin] This command requires a player caller."); return; }
+        if (context.Args.Length != 1 || !Guid.TryParse(context.Args[0], out var archive))
+        { context.Reply("[SurfTimer Admin] !strestore <archive ID>"); return; }
+        _ = RestoreAsync(context.Sender.PlayerID, context.Sender.SessionId, context.Sender.SteamID, archive);
+    }
+
+    private async Task RestoreAsync(int playerId, ulong sessionId, ulong actor, Guid archive)
+    {
+        try
+        {
+            var restored = await records.RestoreRecordAsync(archive, actor).ConfigureAwait(false);
+            if (restored) playback.InvalidateSelection();
+            Reply(playerId, sessionId, restored ? "[SurfTimer Admin] Record and evidence restored."
+                : "[SurfTimer Admin] Archive not found or already restored.");
+        }
+        catch (Exception exception)
+        {
+            logger.LogWarning(exception, "Record archive restore failed for {Archive}.", archive);
+            Reply(playerId, sessionId, "[SurfTimer Admin] Restore failed; a newer active record may exist. Archive evidence is preserved. Check server logs.");
+        }
+    }
     private void OnDeletePb(ICommandContext context)
     {
         if (context.Sender is null) { context.Reply("[SurfTimer Admin] This command requires a player caller."); return; }
         if (context.Args.Length < 2 || !context.Args[^1].Equals("confirm", StringComparison.OrdinalIgnoreCase))
         {
-            context.Reply("[SurfTimer Admin] Destructive command. Usage: !stdeletepb <name|SteamID64> confirm");
+            context.Reply("[SurfTimer Admin] Usage: !stdeletepb <name|SteamID64> confirm");
             return;
         }
         var map = maps.Current?.Name;
@@ -215,14 +267,11 @@ public sealed class AdminCommands(
         {
             var target = await ResolvePlayerAsync(query, playerId, sessionId).ConfigureAwait(false);
             if (target is null) return;
-            var deleted = await records.DeletePersonalBestAsync(target.SteamId, map).ConfigureAwait(false);
-            if (deleted is null)
-            { Reply(playerId, sessionId, $"[SurfTimer Admin] {target.PlayerName} has no PB on {map}."); return; }
-            await records.AppendAdminAuditAsync(actorSteamId, actorName, "record.delete-pb",
-                $"{deleted.SteamId}:{deleted.MapName}",
-                $"player={deleted.PlayerName};time_us={deleted.TimeMicroseconds};completions={deleted.Completions}").ConfigureAwait(false);
-            Reply(playerId, sessionId,
-                $"[SurfTimer Admin] Deleted {deleted.PlayerName}'s {TimerManager.FormatTime(deleted.TimeMicroseconds)} PB on {map} (including replay and splits). This cannot be undone.");
+            var archive = await records.InvalidateRecordAsync(target.SteamId, map, "main", 0, actorSteamId, "Legacy stdeletepb admin command").ConfigureAwait(false);
+            if (archive is not null) playback.InvalidateSelection();
+            Reply(playerId, sessionId, archive is null
+                ? $"[SurfTimer Admin] {target.PlayerName} has no PB on {map}."
+                : $"[SurfTimer Admin] PB invalidated; evidence preserved. Restore with !strestore {archive:N}.");
         }
         catch (Exception exception) { Fail(playerId, sessionId, exception, "delete PB"); }
     }
@@ -394,3 +443,6 @@ public sealed class AdminCommands(
         return enabled || value.Equals("off", StringComparison.OrdinalIgnoreCase) || value == "0" || value.Equals("false", StringComparison.OrdinalIgnoreCase);
     }
 }
+
+
+

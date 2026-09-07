@@ -78,6 +78,12 @@ public sealed class PreferenceCommands(
         session = players.Get(context.Sender.PlayerID)!;
         if (session is null || !session.IsAuthorized || session.SteamId == 0)
         { context.Reply(ChatFormat.Error("Your Steam account is not authorized yet.")); return false; }
+        if (!session.PreferencesLoaded)
+        {
+            players.EnsurePreferencesLoaded(session);
+            context.Reply(ChatFormat.Message("Your saved settings are loading. Please retry this command shortly."));
+            return false;
+        }
         return true;
     }
 

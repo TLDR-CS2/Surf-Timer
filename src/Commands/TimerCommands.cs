@@ -125,10 +125,11 @@ public sealed class TimerCommands(
         session.SelectBonus(bonus);
         var playerId = context.Sender.PlayerID;
         var sessionId = context.Sender.SessionId;
+        var generation = maps.Current?.Generation;
         if (!context.Sender.IsAlive)
         {
             context.Sender.Respawn();
-            core.Scheduler.NextTick(() => FinishBonusTeleport(playerId, sessionId, bonus, location));
+            core.Scheduler.NextTick(() => { if (maps.Current?.Generation == generation) FinishBonusTeleport(playerId, sessionId, bonus, location); });
         }
         else FinishBonusTeleport(playerId, sessionId, bonus, location);
         context.Reply($"[SurfTimer] Bonus {bonus} restarted.");
@@ -139,8 +140,10 @@ public sealed class TimerCommands(
         var player = core.PlayerManager.GetPlayer(playerId);
         if (player is null || player.SessionId != sessionId) return;
         player.Teleport(location.Position, location.Angles, new Vector(0f, 0f, 0f));
+        var generation = maps.Current?.Generation;
         core.Scheduler.DelayBySeconds(0.1f, () =>
         {
+            if (maps.Current?.Generation != generation) return;
             var current = core.PlayerManager.GetPlayer(playerId);
             var session = players.Get(playerId);
             if (current is null || current.SessionId != sessionId || session?.ActiveBonus != bonus) return;
@@ -155,8 +158,8 @@ public sealed class TimerCommands(
         { context.Reply("[SurfTimer] Usage: !stage <number>"); return; }
         var session = players.Get(context.Sender.PlayerID);
         if (session is null) { context.Reply("[SurfTimer] Player session is not ready."); return; }
-        if (!session.StageLocations.TryGetValue(stage, out var location))
-        { context.Reply($"[SurfTimer] Stage {stage} has not been discovered yet. Reach it once first."); return; }
+        if (!TryGetStageLocation(session, stage, out var location))
+        { context.Reply($"[SurfTimer] Stage {stage} has no live start trigger."); return; }
         TeleportToStage(context, session, stage, location);
     }
 
@@ -168,9 +171,18 @@ public sealed class TimerCommands(
         var stage = session.Practice.IsActive && session.Practice.CurrentStage > 0
             ? session.Practice.CurrentStage
             : Math.Max(1, session.Run.CurrentStage);
-        if (!session.StageLocations.TryGetValue(stage, out var location))
+        if (!TryGetStageLocation(session, stage, out var location))
         { context.Reply("[SurfTimer] Current stage position is not known yet."); return; }
         TeleportToStage(context, session, stage, location);
+    }
+
+    private bool TryGetStageLocation(SurfPlayerSession session, int stage, out Practice.SavedLocation location)
+    {
+        if (stage < 1 || stage > Math.Max(1, maps.StageCount)) { location = default!; return false; }
+        if (session.StageLocations.TryGetValue(stage, out location!)) return true;
+        if (!maps.TryGetStageStartTransform(stage, out var position, out var angles)) return false;
+        location = new Practice.SavedLocation(position, angles, new Vector(0f, 0f, 0f), stage);
+        return true;
     }
 
     private void TeleportToStage(ICommandContext context, SurfPlayerSession session, int stage, Practice.SavedLocation location)
@@ -178,14 +190,17 @@ public sealed class TimerCommands(
         replays.Cancel(session.SessionId);
         playback.StopWatching(session.SessionId, restore: false);
         session.Run.Invalidate(RunInvalidationReason.StageTeleport, $"stage={stage}");
+        session.ClearBonus();
         session.Practice.Activate();
         session.Practice.SetStage(stage);
+        session.SetDisplayStage(stage);
         var playerId = context.Sender!.PlayerID;
         var sessionId = context.Sender.SessionId;
+        var generation = maps.Current?.Generation;
         if (!context.Sender.IsAlive)
         {
             context.Sender.Respawn();
-            core.Scheduler.NextTick(() => FinishStageTeleport(playerId, sessionId, location));
+            core.Scheduler.NextTick(() => { if (maps.Current?.Generation == generation) FinishStageTeleport(playerId, sessionId, location); });
         }
         else FinishStageTeleport(playerId, sessionId, location);
         context.Reply($"[SurfTimer] Practice — stage {stage}.");
@@ -234,10 +249,11 @@ public sealed class TimerCommands(
 
         var playerId = context.Sender.PlayerID;
         var sessionId = context.Sender.SessionId;
+        var generation = maps.Current?.Generation;
         if (!context.Sender.IsAlive)
         {
             context.Sender.Respawn();
-            core.Scheduler.NextTick(() => FinishRestart(playerId, sessionId, position.Value, angles.Value));
+            core.Scheduler.NextTick(() => { if (maps.Current?.Generation == generation) FinishRestart(playerId, sessionId, position.Value, angles.Value); });
         }
         else
         {
@@ -251,8 +267,10 @@ public sealed class TimerCommands(
         var player = core.PlayerManager.GetPlayer(playerId);
         if (player is null || player.SessionId != sessionId) return;
         player.Teleport(position, angles, new Vector(0f, 0f, 0f));
+        var generation = maps.Current?.Generation;
         core.Scheduler.DelayBySeconds(0.1f, () =>
         {
+            if (maps.Current?.Generation != generation) return;
             var current = core.PlayerManager.GetPlayer(playerId);
             var currentSession = players.Get(playerId);
             if (current is null || current.SessionId != sessionId || currentSession is null) return;
@@ -264,3 +282,5 @@ public sealed class TimerCommands(
         });
     }
 }
+
+

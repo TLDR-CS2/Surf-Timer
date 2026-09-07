@@ -12,6 +12,7 @@ using SurfTimer.Replays;
 using SwiftlyS2.Shared;
 using SwiftlyS2.Shared.Plugins;
 using BotControllerApi;
+using SurfTimer.Titles;
 
 namespace SurfTimer;
 
@@ -62,6 +63,17 @@ public sealed class Plugin(ISwiftlyCore core) : BasePlugin(core)
             "config.jsonc",
             SurfTimerOptions.SectionName);
         var options = SurfTimerOptionsLoader.Load(Core);
+        if (!options.Enabled)
+        {
+            Core.LoggerFactory.CreateLogger<Plugin>().LogInformation("SurfTimer is disabled in configuration; reload the plugin after enabling it.");
+            return;
+        }
+
+        if (options.DebugLogging)
+            Core.LoggerFactory.CreateLogger<Plugin>().LogInformation(
+                "SurfTimer diagnostics: server={ServerId}, catalog authority={Authority}, replay limit={ReplayMinutes} minutes, HUD={HudHz} Hz, voting={Voting}, hot reload={HotReload}.",
+                options.ServerId, options.CatalogAuthorityServerId, options.MaximumReplayMinutes,
+                options.HudRefreshRateHz, options.MapVoting.Enabled, hotReload);
 
         var serviceCollection = new ServiceCollection();
         serviceCollection
@@ -71,18 +83,23 @@ public sealed class Plugin(ISwiftlyCore core) : BasePlugin(core)
             .AddSingleton<MigrationRunner>()
             .AddSingleton<RecordRepository>()
             .AddSingleton<PlayerPreferenceRepository>()
+            .AddSingleton<PlayerTitleRepository>()
+            .AddSingleton<TitleManager>()
             .AddSingleton<ReplayRecorder>()
             .AddSingleton<ReplayPlaybackManager>()
             .AddSingleton<PluginRuntime>()
             .AddSingleton<SurfPlayerManager>()
             .AddSingleton<MapConfigurationProvider>()
             .AddSingleton<MapLifecycle>()
+            .AddSingleton<FinishZoneRenderer>()
             .AddSingleton<TimerManager>()
             .AddSingleton<TimerCommands>()
+            .AddSingleton<StageAttemptCommands>()
             .AddSingleton<PracticeCommands>()
             .AddSingleton<RecordCommands>()
             .AddSingleton<ReplayCommands>()
             .AddSingleton<PreferenceCommands>()
+            .AddSingleton<TitleCommands>()
             .AddSingleton<PublicCommands>()
             .AddSingleton<ProfileCommands>()
             .AddSingleton<AdminCommands>()
@@ -100,16 +117,21 @@ public sealed class Plugin(ISwiftlyCore core) : BasePlugin(core)
 
         _services.GetRequiredService<RecordRepository>().Start();
         _services.GetRequiredService<PlayerPreferenceRepository>().Start();
+        _services.GetRequiredService<PlayerTitleRepository>().Start();
+        _services.GetRequiredService<TitleManager>().Start();
         _services.GetRequiredService<MapLifecycle>().Start(hotReload);
+        _services.GetRequiredService<FinishZoneRenderer>().Start(hotReload);
         _services.GetRequiredService<SurfPlayerManager>().Start(hotReload);
         _services.GetRequiredService<TimerManager>().Start();
         _services.GetRequiredService<ReplayRecorder>().Start();
         _services.GetRequiredService<ReplayPlaybackManager>().Start();
         _services.GetRequiredService<TimerCommands>().Register();
+        _services.GetRequiredService<StageAttemptCommands>().Register();
         _services.GetRequiredService<PracticeCommands>().Register();
         _services.GetRequiredService<RecordCommands>().Register();
         _services.GetRequiredService<ReplayCommands>().Register();
         _services.GetRequiredService<PreferenceCommands>().Register();
+        _services.GetRequiredService<TitleCommands>().Register();
         _services.GetRequiredService<PublicCommands>().Register();
         _services.GetRequiredService<ProfileCommands>().Register();
         _services.GetRequiredService<AdminCommands>().Register();
@@ -131,6 +153,7 @@ public sealed class Plugin(ISwiftlyCore core) : BasePlugin(core)
         _services.GetService<RecordCommands>()?.Unregister();
         _services.GetService<ReplayCommands>()?.Unregister();
         _services.GetService<PreferenceCommands>()?.Unregister();
+        _services.GetService<TitleCommands>()?.Unregister();
         _services.GetService<PublicCommands>()?.Unregister();
         _services.GetService<ProfileCommands>()?.Unregister();
         _services.GetService<AdminCommands>()?.Unregister();
@@ -138,13 +161,17 @@ public sealed class Plugin(ISwiftlyCore core) : BasePlugin(core)
         _services.GetService<HudManager>()?.Stop();
         _services.GetService<FlashingHtmlHudFix>()?.Stop();
         _services.GetService<TimerCommands>()?.Unregister();
+        _services.GetService<StageAttemptCommands>()?.Unregister();
         _services.GetService<PracticeCommands>()?.Unregister();
         _services.GetService<TimerManager>()?.Stop();
         _services.GetService<ReplayRecorder>()?.Stop();
         _services.GetService<ReplayPlaybackManager>()?.Stop();
         _services.GetService<SurfPlayerManager>()?.Stop();
         _services.GetService<MapLifecycle>()?.Stop();
+        _services.GetService<FinishZoneRenderer>()?.Stop();
         _services.GetService<PlayerPreferenceRepository>()?.Stop();
+        _services.GetService<PlayerTitleRepository>()?.Stop();
+        _services.GetService<TitleManager>()?.Stop();
         _services.GetService<PluginRuntime>()?.Stop();
         _services.Dispose();
         _services = null;
@@ -210,3 +237,5 @@ internal sealed class PluginRuntime(
         logger.LogInformation("SurfTimer {Version} unloaded.", BuildInfo.Version);
     }
 }
+
+

@@ -24,7 +24,7 @@ public sealed class ReplayCommands(
         // name. SurfTimer owns !replay on a surf server.
         core.Command.UnregisterCommand("sw_replay");
         _registration = core.Command.RegisterCommand("replay", OnReplay, registerRaw: false,
-            helpText: "Plays a global top-10 replay: !replay [1-10].");
+            helpText: "Replay: !replay [1-10|stop|pause|resume|seek seconds|speed 0.25-4].");
         core.Command.RegisterCommandAlias("sw_replay", "css_replay", registerRaw: true);
         _bonusRegistration = core.Command.RegisterCommand("bonusreplay", OnBonusReplay, registerRaw: false,
             helpText: "Plays a bonus top-10 replay: !breplay <bonus> [rank].");
@@ -68,8 +68,7 @@ public sealed class ReplayCommands(
     {
         try
         {
-            var replay=await playback.SelectStageAsync(map,stage,rank).ConfigureAwait(false);
-            if (replay is not null) playback.Watch(playerId,sessionId);
+            var replay=await playback.WatchAsync(map,"stage",stage,rank,playerId,sessionId).ConfigureAwait(false);
             Reply(playerId,sessionId,replay is null
                 ? $"[SurfTimer] Stage {stage} rank #{rank} has no PB replay."
                 : $"[SurfTimer] Playing Stage {stage} #{rank} {replay.PlayerName} — {TimerManager.FormatTime(replay.TimeMicroseconds)}");
@@ -99,8 +98,7 @@ public sealed class ReplayCommands(
     {
         try
         {
-            var replay = await playback.SelectBonusAsync(map, bonus, rank).ConfigureAwait(false);
-            if (replay is not null) playback.Watch(playerId, sessionId);
+            var replay = await playback.WatchAsync(map,"bonus",bonus,rank,playerId,sessionId).ConfigureAwait(false);
             Reply(playerId, sessionId, replay is null
                 ? $"[SurfTimer] Bonus {bonus} rank #{rank} has no PB replay."
                 : $"[SurfTimer] Playing Bonus {bonus} #{rank} {replay.PlayerName} — {TimerManager.FormatTime(replay.TimeMicroseconds)}");
@@ -124,7 +122,22 @@ public sealed class ReplayCommands(
             return;
         }
         var rank = 1;
-        if (context.Args.Length > 0 && (!int.TryParse(context.Args[0], out rank) || rank is < 1 or > 10))
+        if (context.Args.Length > 0 && context.Args[0].ToLowerInvariant() is "pause" or "resume" or "seek" or "speed")
+        {
+            var action = context.Args[0].ToLowerInvariant();
+            double value = 0;
+            if (action is "seek" or "speed")
+            {
+                if (context.Args.Length != 2 || !double.TryParse(context.Args[1], System.Globalization.NumberStyles.Float,
+                    System.Globalization.CultureInfo.InvariantCulture, out value) || !double.IsFinite(value) ||
+                    (action == "speed" && value is < 0.25 or > 4) || (action == "seek" && value < 0))
+                { context.Reply("[SurfTimer] Usage: !replay seek <seconds> | !replay speed <0.25-4>"); return; }
+            }
+            else if (context.Args.Length != 1) { context.Reply("[SurfTimer] Usage: !replay pause | !replay resume"); return; }
+            context.Reply("[SurfTimer] " + playback.Control(context.Sender.SessionId, action, value));
+            return;
+        }
+        if (context.Args.Length > 1 || (context.Args.Length > 0 && (!int.TryParse(context.Args[0], out rank) || rank is < 1 or > 10)))
         { context.Reply("[SurfTimer] Usage: !replay [1-10]"); return; }
         var playerId = context.Sender.PlayerID; var sessionId = context.Sender.SessionId;
         _ = SelectAsync(map, rank, playerId, sessionId);
@@ -134,8 +147,7 @@ public sealed class ReplayCommands(
     {
         try
         {
-            var replay = await playback.SelectAsync(map, rank).ConfigureAwait(false);
-            if (replay is not null) playback.Watch(playerId, sessionId);
+            var replay = await playback.WatchAsync(map,"main",0,rank,playerId,sessionId).ConfigureAwait(false);
             Reply(playerId, sessionId, replay is null
                 ? $"[SurfTimer] Global rank #{rank} has no PB replay."
                 : $"[SurfTimer] Playing #{rank} {replay.PlayerName} — {TimerManager.FormatTime(replay.TimeMicroseconds)}");

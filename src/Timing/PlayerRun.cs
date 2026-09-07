@@ -24,7 +24,9 @@ public enum RunInvalidationReason
     CheckpointOrder,
     StageOrder,
     FinishOrder,
-    MapChange
+    MapChange,
+    CancelZone,
+    RulesetChanged
 }
 
 public sealed record RunInvalidation(RunInvalidationReason Reason, string Details, DateTimeOffset OccurredAt);
@@ -45,6 +47,7 @@ public sealed class PlayerRun
     private readonly List<long> _stageSplits = [];
 
     public RunState State { get; private set; }
+    public long Revision { get; private set; }
     public EngineTimestamp StartedAt { get; private set; }
     public long LastElapsedMicroseconds { get; private set; }
     public int LastCheckpoint { get; private set; }
@@ -54,11 +57,13 @@ public sealed class PlayerRun
     public IReadOnlyList<long> CheckpointSplits => _checkpointSplits;
     public IReadOnlyList<long> StageSplits => _stageSplits;
     public RunInvalidation? LastInvalidation { get; private set; }
+    public string RulesetFingerprint { get; private set; } = "legacy";
 
     public bool EnterStartZone()
     {
         if (StartZoneTouchDepth < int.MaxValue) StartZoneTouchDepth++;
         if (StartZoneTouchDepth != 1) return false;
+        Revision++;
         State = RunState.Armed;
         LastElapsedMicroseconds = 0;
         LastCheckpoint = 0;
@@ -89,10 +94,12 @@ public sealed class PlayerRun
         return true;
     }
 
-    public bool Start(EngineTimestamp timestamp)
+    public bool Start(EngineTimestamp timestamp, string rulesetFingerprint = "legacy")
     {
         if (State != RunState.Armed) return false;
+        Revision++;
         StartedAt = timestamp;
+        RulesetFingerprint = rulesetFingerprint;
         StageStartedAt = timestamp;
         State = RunState.Running;
         return true;
@@ -142,6 +149,7 @@ public sealed class PlayerRun
 
     private void ResetCore()
     {
+        Revision++;
         State = RunState.Idle;
         StartedAt = default;
         LastElapsedMicroseconds = 0;

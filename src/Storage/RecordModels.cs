@@ -14,7 +14,12 @@ public sealed record CompletedRun(
     IReadOnlyList<long> StageTimes,
     string ServerId,
     ReplayCapture? Replay,
-    RunTelemetry Telemetry);
+    RunTelemetry Telemetry)
+{
+    public Guid RunId { get; init; } = Guid.NewGuid();
+    public DateTimeOffset FinishedAtUtc { get; init; } = DateTimeOffset.UtcNow;
+    public string RulesetFingerprint { get; init; } = "legacy";
+}
 
 public sealed record CompletedBonusRun(
     ulong SteamId,
@@ -25,7 +30,12 @@ public sealed record CompletedBonusRun(
     long TimeMicroseconds,
     string ServerId,
     ReplayCapture? Replay,
-    RunTelemetry Telemetry);
+    RunTelemetry Telemetry)
+{
+    public Guid RunId { get; init; } = Guid.NewGuid();
+    public DateTimeOffset FinishedAtUtc { get; init; } = DateTimeOffset.UtcNow;
+    public string RulesetFingerprint { get; init; } = "legacy";
+}
 
 public sealed record SaveRecordResult(
     bool IsPersonalBest,
@@ -132,3 +142,14 @@ public sealed record OverallRanking(
     int Rank, ulong SteamId, string PlayerName, long Points, int CompletedMaps,
     int Group1, int Group2, int Group3, int Group4, int Group5,
     long MapPoints, long StagePoints, long BonusPoints, string Title);
+
+public sealed record CompletedStageRun(
+    ulong SteamId, string PlayerName, string MapName, string? WorkshopId, int Stage,
+    long TimeMicroseconds, string ServerId, ReplayCapture? Replay, RunTelemetry Telemetry)
+{
+    public bool CompetitiveStartCertified { get; init; }
+    public Guid RunId { get; init; } = Guid.NewGuid();
+    public DateTimeOffset FinishedAtUtc { get; init; } = DateTimeOffset.UtcNow;
+    public string RulesetFingerprint { get; init; } = "legacy";
+}
+

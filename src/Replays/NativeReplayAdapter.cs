@@ -4,6 +4,17 @@ namespace SurfTimer.Replays;
 
 internal static class NativeReplayAdapter
 {
+    public static ReplayTick[] WeaponlessTicks(ReplayCapture capture)
+    {
+        // Work on a copy: stored captures and concurrent viewers retain their original data.
+        var ticks = capture.IsNative ? capture.NativeTicks!.ToArray() : Convert(capture);
+        for (var index = 0; index < ticks.Length; index++)
+        {
+            ticks[index].WeaponDefIndex = -1;
+        }
+        return ticks;
+    }
+
     // Source 2's MOVETYPE_WALK. Surf acceleration and gravity are applied by the
     // native movement hook between the pre/post snapshots.
     private const byte MoveTypeWalk = 2;

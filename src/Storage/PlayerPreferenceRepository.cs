@@ -13,6 +13,8 @@ public sealed class PlayerPreferenceRepository(
 {
     private readonly CancellationTokenSource _shutdown = new();
     private Task? _ready;
+    private readonly object _saveLock = new();
+    private readonly Dictionary<ulong, Task> _saves = [];
 
     public void Start() => _ready ??= Task.Run(() => migrations.ApplyAsync(_shutdown.Token));
 
@@ -41,7 +43,29 @@ public sealed class PlayerPreferenceRepository(
             Convert.ToBoolean(reader.GetValue(4)), Convert.ToBoolean(reader.GetValue(5)));
     }
 
-    public async Task SaveAsync(ulong steamId, PlayerPreferences preferences)
+    public Task SaveAsync(ulong steamId, PlayerPreferences preferences)
+    {
+        lock (_saveLock)
+        {
+            var previous = _saves.GetValueOrDefault(steamId) ?? Task.CompletedTask;
+            var next = SaveAfterAsync(previous, steamId, preferences);
+            _saves[steamId] = next;
+            _ = next.ContinueWith(_ =>
+            {
+                lock (_saveLock)
+                    if (_saves.GetValueOrDefault(steamId) == next) _saves.Remove(steamId);
+            }, TaskScheduler.Default);
+            return next;
+        }
+    }
+
+    private async Task SaveAfterAsync(Task previous, ulong steamId, PlayerPreferences preferences)
+    {
+        try { await previous.ConfigureAwait(false); } catch { /* A failed older save must not discard newer settings. */ }
+        await SaveDirectAsync(steamId, preferences).ConfigureAwait(false);
+    }
+
+    private async Task SaveDirectAsync(ulong steamId, PlayerPreferences preferences)
     {
         await ReadyAsync().ConfigureAwait(false);
         await using var connection = await core.Database.OpenConnectionAsync(options.DatabaseConnection, _shutdown.Token)

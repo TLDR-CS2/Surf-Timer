@@ -13,6 +13,9 @@ if (-not $servers) {
 }
 
 foreach ($server in $servers) {
-    Stop-Process -Id $server.Id
-    Write-Host "Stopped local CS2 server PID $($server.Id)."
+    Stop-Process -Id $server.Id -ErrorAction SilentlyContinue
+    if (Get-Process -Id $server.Id -ErrorAction SilentlyContinue) {
+        throw "Local CS2 server PID $($server.Id) did not stop."
+    }
+    Write-Host "Stopped local CS2 server PID $($server.Id) (or it had already exited)."
 }
